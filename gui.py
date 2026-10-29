@@ -63,6 +63,10 @@ class App(tk.Tk):
 
         self._build_widgets()
 
+        # 窗口尺寸变化时让长文字标签自动换行，防止缩小后文字被裁切
+        self.bind("<Configure>", self._on_resize)
+        self.after_idle(self._update_wraps)
+
     # ------------------------------------------------------------------ 界面
     def _build_widgets(self) -> None:
         # ===== 唯一的输入：拖放区域 =====
@@ -90,7 +94,7 @@ class App(tk.Tk):
         ttk.Button(btn_row, text="选择文件…", command=self._pick_files).pack(side="left")
         ttk.Button(btn_row, text="选择文件夹…", command=self._pick_folder).pack(side="left", padx=6)
         self.status_label = ttk.Label(btn_row, text="等待拖入或选择…")
-        self.status_label.pack(side="left", padx=12)
+        self.status_label.pack(side="left", fill="x", expand=True, padx=12)
 
         # 注册拖放目标（Windows 原生；非 Windows 时为 no-op，仍可走上方浏览按钮）
         if enable_drop:
@@ -121,13 +125,14 @@ class App(tk.Tk):
         self.out_entry.pack(side="left", fill="x", expand=True, padx=6)
         ttk.Button(row, text="选择…", command=self._pick_out_dir).pack(side="left", padx=4)
         ttk.Button(row, text="恢复默认", command=self._reset_out_dir).pack(side="left")
-        ttk.Label(
+        self.out_desc = ttk.Label(
             out_frame,
             text=(
                 "留空 = 默认：各 CUE 所在目录下的『专辑名』子文件夹；"
                 "也可指定统一输出根目录（配置会被记住，下次自动复用）。"
             ),
-        ).pack(anchor="w", padx=4, pady=(2, 0))
+        )
+        self.out_desc.pack(anchor="w", fill="x", padx=4, pady=(2, 0))
 
         # ===== 解析结果列表 =====
         list_frame = ttk.LabelFrame(
@@ -182,11 +187,32 @@ class App(tk.Tk):
         self.lbl_hint = ttk.Label(
             act, text="（右键条目可移除；内容过长时拖动右侧滚动条浏览）"
         )
-        self.lbl_hint.pack(side="left", padx=12)
+        self.lbl_hint.pack(side="left", fill="x", expand=True, padx=12)
 
         # ===== 日志 =====
         self.text_log = tk.Text(self, height=9, state="normal")
         self.text_log.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+
+        # 记录需要随窗口缩小自动换行的长文字标签：(控件, 额外边距)
+        # 当方框横向缩小、文字超出可用宽度时，这些标签会动态换行，避免被裁切。
+        self._wrappables = [
+            (self.drop_label, 34),   # padx=16*2
+            (self.status_label, 24),  # padx=12*2
+            (self.out_desc, 10),     # out_frame padding(8) + 自身 padx(4)
+            (self.lbl_hint, 24),     # padx=12*2
+        ]
+
+    # ----------------------------------------------------- 自适应换行（防止缩小时文字裁切）
+    def _on_resize(self, event) -> None:
+        # 仅响应根窗口本身的尺寸变化（子控件的事件会冒泡上来，需过滤）
+        if event.widget is self:
+            self._update_wraps()
+
+    def _update_wraps(self) -> None:
+        for label, pad in getattr(self, "_wrappables", []):
+            w = label.winfo_width()
+            if w > pad + 10:
+                label.config(wraplength=max(20, w - pad))
 
     # ----------------------------------------------------- 选择（浏览回退）
     def _pick_files(self) -> None:

@@ -19,6 +19,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from cue2flac.cue_parser import CueSheet, parse_cue
 from cue2flac.splitter import split
+from cue2flac.batch import process_directory, format_summary
 
 # 拖放为 Windows 原生实现（零依赖）；非 Windows 下 enable_drop 自动空操作。
 try:
@@ -99,6 +100,11 @@ class App(tk.Tk):
             self, text="开始分轨", command=self.start, state="disabled"
         )
         self.btn_start.pack(pady=4)
+
+        self.btn_batch = ttk.Button(
+            self, text="批量处理文件夹…", command=self.batch_dir
+        )
+        self.btn_batch.pack(pady=(0, 4))
 
         self.text_log = tk.Text(self, height=8, state="normal")
         self.text_log.pack(fill="both", expand=True, padx=10, pady=(0, 10))
@@ -354,6 +360,46 @@ class App(tk.Tk):
             messagebox.showerror("分轨失败", str(e))
         finally:
             self.btn_start.config(state="normal")
+
+    # ----------------------------------------------------- 批量处理文件夹
+    def batch_dir(self) -> None:
+        root = filedialog.askdirectory(title="选择要批量扫描的文件夹（含子目录中的 .cue）")
+        if not root:
+            return
+        self.btn_batch.config(state="disabled")
+        self.btn_start.config(state="disabled")
+        self.log(f"\n开始批量处理：{root}\n")
+        threading.Thread(target=self._run_batch, args=(root,), daemon=True).start()
+
+    def _run_batch(self, root: str) -> None:
+        try:
+            result = process_directory(
+                root,
+                recursive=True,
+                out=None,  # 每个专辑输出到其 CUE 所在目录下的 <专辑名> 子文件夹
+                on_progress=self.log,
+            )
+            # 顶部再打印一次汇总，确保可见
+            self.log("\n" + format_summary(result) + "\n")
+            if result.success_count == 0:
+                messagebox.showwarning(
+                    "批量处理",
+                    f"未成功处理任何 CUE（共扫描 {result.scanned} 个，跳过 {result.skip_count} 个）。\n"
+                    "请查看日志中的跳过原因。",
+                )
+            else:
+                messagebox.showinfo(
+                    "批量处理完成",
+                    f"成功 {result.success_count} 个，跳过 {result.skip_count} 个。\n"
+                    "详见日志汇总。",
+                )
+        except Exception as e:  # noqa: BLE001
+            self.log(f"批量处理出错：{e}\n")
+            messagebox.showerror("批量处理出错", str(e))
+        finally:
+            self.btn_batch.config(state="normal")
+            if self.sheet:
+                self.btn_start.config(state="normal")
 
     def log(self, msg: str) -> None:
         self.text_log.insert(tk.END, msg)

@@ -44,6 +44,7 @@ jobs:
             --hidden-import cue2flac.cli `
             --hidden-import cue2flac.cue_parser `
             --hidden-import cue2flac.splitter `
+            --hidden-import cue2flac.batch `
             --hidden-import cue2flac.ffmpeg_provider `
             --hidden-import tkinter `
             --hidden-import dnd `
@@ -93,6 +94,57 @@ jobs:
             }
           }
           Write-Host "Smoke test OK: 生成 $($files.Count) 个 FLAC"
+
+      - name: Batch smoke test (scan directory, skip broken)
+        shell: pwsh
+        run: |
+          # 构造一个含子目录、有效与损坏 CUE 的测试树
+          New-Item -ItemType Directory -Force sub\A, sub\B | Out-Null
+          ./ffmpeg.exe -f lavfi -i anullsrc=r=44100:cl=stereo -t 3 -y sub\A\audioA.wav 2>$null
+          ./ffmpeg.exe -f lavfi -i anullsrc=r=44100:cl=stereo -t 3 -y sub\B\audioB.wav 2>$null
+          @"
+          FILE "audioA.wav" WAVE
+            TRACK 01 AUDIO
+              TITLE "SongA1"
+              INDEX 01 00:00:00
+            TRACK 02 AUDIO
+              TITLE "SongA2"
+              INDEX 01 00:01:50
+          "@ | Set-Content -Encoding ascii sub\A\albumA.cue
+          @"
+          FILE "audioB.wav" WAVE
+            TRACK 01 AUDIO
+              TITLE "SongB1"
+              INDEX 01 00:00:00
+          "@ | Set-Content -Encoding ascii sub\B\albumB.cue
+          # 损坏的 CUE：无 TRACK，应被跳过
+          @"
+          REM just a broken cue
+          FILE "nope.wav" WAVE
+          "@ | Set-Content -Encoding ascii sub\broken.cue
+
+          # 批量扫描 sub 目录（递归），输出到 batchout
+          ./dist/cue2flac.exe --dir sub -o batchout --no-cover
+          # 若窗口化 exe 产生了日志，打印出来便于排查
+          $log = Join-Path dist cue2flac_cli.log
+          if (Test-Path $log) { Write-Host "=== cue2flac_cli.log ==="; Get-Content $log }
+
+          # 校验：应成功处理 2 个（A、B），跳过 1 个（broken）
+          $ok = 0
+          if (Test-Path batchout) {
+            $ok = (Get-ChildItem batchout -Directory).Count
+          }
+          if ($ok -ne 2) {
+            Write-Error "批量处理期望成功 2 个专辑，实际 $ok 个"
+            exit 1
+          }
+          # 统计所有生成的 FLAC：A 有 2 首，B 有 1 首，共 3 首
+          $flacs = Get-ChildItem batchout -Recurse -Filter *.flac
+          if ($flacs.Count -ne 3) {
+            Write-Error "批量处理期望生成 3 个 FLAC，实际 $($flacs.Count) 个"
+            exit 1
+          }
+          Write-Host "Batch smoke test OK: 成功 2 个专辑 / 跳过 1 个损坏 CUE / 共 3 首 FLAC"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

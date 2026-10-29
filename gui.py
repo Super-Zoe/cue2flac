@@ -253,9 +253,18 @@ class App(tk.Tk):
     def _relayout(self) -> None:
         # 折行与换行互相影响（换行宽度会改变控件的请求宽度，进而改变列宽），
         # 迭代两次让两者收敛，避免出现「换行宽度大于实际宽度」的裁切隐患。
-        for _ in range(2):
-            self._reflow()
-            self._update_wraps()
+        # grid 配置后几何不会立即生效，需先刷新待处理布局再读取真实宽度。
+        if getattr(self, "_relaying_out", False):  # 防重入
+            return
+        self._relaying_out = True
+        try:
+            for _ in range(2):
+                self._reflow()
+                self.update_idletasks()
+                self._update_wraps()
+                self.update_idletasks()
+        finally:
+            self._relaying_out = False
 
     def _reflow(self) -> None:
         """按钮行在宽度不足时自动折行，避免按钮 / 文字被裁切看不见。

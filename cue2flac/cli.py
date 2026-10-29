@@ -55,6 +55,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    # 必须在解析参数前重定向：--windowed 打包后 sys.stdout 为 None，
+    # argparse 的 --version/--help 会直接写 sys.stdout，不提前重定向会崩溃。
+    log_path = _setup_windowed_logging()
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -62,7 +66,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.print_help()
         return 2
 
-    log_path = _setup_windowed_logging()
     try:
         sheet = parse_cue(args.cue, audio_hint=args.audio)
         out_dir = args.out or os.path.join(

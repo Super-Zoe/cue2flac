@@ -52,10 +52,38 @@ jobs:
           echo "--- dist ---"
           ls dist
 
-      - name: Smoke test (CLI help)
+      - name: Smoke test (end-to-end split)
         shell: pwsh
         run: |
-          ./dist/cue2flac.exe --version
+          # 生成 3 秒静音立体声 WAV，作为整轨测试素材
+          ./ffmpeg.exe -f lavfi -i anullsrc=r=44100:cl=stereo -t 3 -y test.wav
+          # 写一个最小 CUE，把整轨切成两首
+          @"
+          FILE "test.wav" WAVE
+            TRACK 01 AUDIO
+              TITLE "TestTrack1"
+              PERFORMER "SmokeTest"
+              INDEX 01 00:00:00
+            TRACK 02 AUDIO
+              TITLE "TestTrack2"
+              PERFORMER "SmokeTest"
+              INDEX 01 00:01:50
+          "@ | Set-Content -Encoding ascii test.cue
+          # 用打包好的 exe 执行分轨
+          ./dist/cue2flac.exe test.cue -o out --no-cover
+          # 校验：必须产出两首非空 FLAC
+          $files = Get-ChildItem out -Filter *.flac
+          if ($files.Count -ne 2) {
+            Write-Error "期望生成 2 个 FLAC，实际 $($files.Count) 个"
+            exit 1
+          }
+          foreach ($f in $files) {
+            if ($f.Length -lt 1000) {
+              Write-Error "FLAC 文件过小：$($f.Name) ($($f.Length) B)"
+              exit 1
+            }
+          }
+          Write-Host "Smoke test OK: 生成 $($files.Count) 个 FLAC"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

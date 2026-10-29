@@ -22,6 +22,7 @@ from tkinter import filedialog, messagebox, ttk
 from cue2flac.cue_parser import parse_cue
 from cue2flac.batch import process_cues, expand_to_cues
 from cue2flac.config import get_out_dir, set_out_dir
+from cue2flac.layout import plan_rows
 
 # 拖放为 Windows 原生实现（零依赖）；非 Windows 下 enable_drop 自动空操作。
 try:
@@ -60,12 +61,14 @@ class App(tk.Tk):
         self.out_dir: Optional[str] = get_out_dir()
 
         self._orig_bg: Optional[str] = None
+        # 需要「宽度不足时自动折行」的按钮行：(容器, [(控件, padx, 是否弹性拉伸)])
+        self._flows: list = []
 
         self._build_widgets()
 
-        # 窗口尺寸变化时让长文字标签自动换行，防止缩小后文字被裁切
+        # 窗口尺寸变化时重新排布按钮行、并让长文字自动换行，防止缩小后文字被裁切
         self.bind("<Configure>", self._on_resize)
-        self.after_idle(self._update_wraps)
+        self.after_idle(self._relayout)
 
     # ------------------------------------------------------------------ 界面
     def _build_widgets(self) -> None:
@@ -91,10 +94,21 @@ class App(tk.Tk):
 
         btn_row = ttk.Frame(zone)
         btn_row.pack(fill="x", padx=6, pady=(0, 6))
-        ttk.Button(btn_row, text="选择文件…", command=self._pick_files).pack(side="left")
-        ttk.Button(btn_row, text="选择文件夹…", command=self._pick_folder).pack(side="left", padx=6)
+        self.btn_files = ttk.Button(btn_row, text="选择文件…", command=self._pick_files)
+        self.btn_folder = ttk.Button(
+            btn_row, text="选择文件夹…", command=self._pick_folder
+        )
         self.status_label = ttk.Label(btn_row, text="等待拖入或选择…")
-        self.status_label.pack(side="left", fill="x", expand=True, padx=12)
+        self._flows.append(
+            (
+                btn_row,
+                [
+                    (self.btn_files, 0, False),
+                    (self.btn_folder, 6, False),
+                    (self.status_label, 12, True),
+                ],
+            )
+        )
 
         # 注册拖放目标（Windows 原生；非 Windows 时为 no-op，仍可走上方浏览按钮）
         if enable_drop:
@@ -119,12 +133,22 @@ class App(tk.Tk):
 
         row = ttk.Frame(out_frame)
         row.pack(fill="x", padx=4, pady=2)
-        ttk.Label(row, text="保存到：").pack(side="left")
+        self.lbl_save = ttk.Label(row, text="保存到：")
         self.out_dir_var = tk.StringVar(value=self.out_dir or "")
         self.out_entry = ttk.Entry(row, textvariable=self.out_dir_var)
-        self.out_entry.pack(side="left", fill="x", expand=True, padx=6)
-        ttk.Button(row, text="选择…", command=self._pick_out_dir).pack(side="left", padx=4)
-        ttk.Button(row, text="恢复默认", command=self._reset_out_dir).pack(side="left")
+        self.btn_pick_out = ttk.Button(row, text="选择…", command=self._pick_out_dir)
+        self.btn_reset_out = ttk.Button(row, text="恢复默认", command=self._reset_out_dir)
+        self._flows.append(
+            (
+                row,
+                [
+                    (self.lbl_save, 0, False),
+                    (self.out_entry, 6, True),
+                    (self.btn_pick_out, 4, False),
+                    (self.btn_reset_out, 0, False),
+                ],
+            )
+        )
         self.out_desc = ttk.Label(
             out_frame,
             text=(
@@ -157,10 +181,15 @@ class App(tk.Tk):
         self.tree.heading("曲目数", text="曲目数")
         self.tree.column("曲目数", width=70, anchor="center")
 
+        # 垂直 + 水平滚动条：内容过多或窗口过窄时，两个方向都能滚动浏览
         vsb = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vsb.set)
-        self.tree.pack(fill="both", expand=True, padx=4, pady=4, side="left")
-        vsb.pack(fill="y", pady=4, side="right")
+        hsb = ttk.Scrollbar(list_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.tree.grid(row=0, column=0, sticky="nsew", padx=4, pady=(4, 0))
+        vsb.grid(row=0, column=1, sticky="ns", pady=(4, 0))
+        hsb.grid(row=1, column=0, sticky="ew", padx=4, pady=(0, 4))
+        list_frame.grid_rowconfigure(0, weight=1)
+        list_frame.grid_columnconfigure(0, weight=1)
 
         # 逐项删减：右键菜单、Delete 键、选中态联动「删除选中」按钮
         self.tree.bind("<Button-3>", self._on_tree_right_click)
@@ -178,16 +207,24 @@ class App(tk.Tk):
         self.btn_convert = ttk.Button(
             act, text="开始转换", command=self._on_convert, state="disabled"
         )
-        self.btn_convert.pack(side="left")
         self.btn_delete = ttk.Button(
             act, text="删除选中", command=self._delete_selected, state="disabled"
         )
-        self.btn_delete.pack(side="left", padx=6)
-        ttk.Button(act, text="清空", command=self._clear).pack(side="left", padx=6)
+        self.btn_clear = ttk.Button(act, text="清空", command=self._clear)
         self.lbl_hint = ttk.Label(
             act, text="（右键条目可移除；内容过长时拖动右侧滚动条浏览）"
         )
-        self.lbl_hint.pack(side="left", fill="x", expand=True, padx=12)
+        self._flows.append(
+            (
+                act,
+                [
+                    (self.btn_convert, 0, False),
+                    (self.btn_delete, 6, False),
+                    (self.btn_clear, 6, False),
+                    (self.lbl_hint, 12, True),
+                ],
+            )
+        )
 
         # ===== 日志 =====
         self.text_log = tk.Text(self, height=9, state="normal")
@@ -202,11 +239,49 @@ class App(tk.Tk):
             (self.lbl_hint, 24),     # padx=12*2
         ]
 
-    # ----------------------------------------------------- 自适应换行（防止缩小时文字裁切）
+    # ----------------------------------------------------- 自适应布局（防止缩小时文字被裁切）
     def _on_resize(self, event) -> None:
         # 仅响应根窗口本身的尺寸变化（子控件的事件会冒泡上来，需过滤）
         if event.widget is self:
-            self._update_wraps()
+            self._relayout()
+
+    def _relayout(self) -> None:
+        self._reflow()
+        self._update_wraps()
+
+    def _reflow(self) -> None:
+        """按钮行在宽度不足时自动折行，避免按钮 / 文字被裁切看不见。
+
+        Tkinter 的 pack 不会换行，窄窗口下横向排列的按钮会溢出被裁切；
+        这里改用 grid 动态重排：按可用宽度贪心分行，弹性控件拉伸填充剩余空间。
+        """
+        for parent, items in getattr(self, "_flows", []):
+            avail = parent.winfo_width() - 8
+            if avail < 20:
+                # 尚未完成布局（宽度为 0/1）：先按一行排，之后尺寸就绪会再重排
+                avail = 10 ** 6
+
+            # 弹性控件（状态栏 / 提示 / 输入框）可被拉伸，按最小占用宽度计算
+            sizes = [
+                60 if expand else w.winfo_reqwidth() + 2 * padx
+                for w, padx, expand in items
+            ]
+            rows = [[items[i] for i in row] for row in plan_rows(sizes, avail)]
+
+            ncols = max(len(r) for r in rows)
+            for c in range(ncols):
+                parent.grid_columnconfigure(c, weight=0)
+            for r, row_items in enumerate(rows):
+                for c, (w, padx, expand) in enumerate(row_items):
+                    w.grid_configure(
+                        row=r,
+                        column=c,
+                        sticky="ew" if expand else "w",
+                        padx=padx,
+                        pady=2,
+                    )
+                    if expand:
+                        parent.grid_columnconfigure(c, weight=1)
 
     def _update_wraps(self) -> None:
         for label, pad in getattr(self, "_wrappables", []):

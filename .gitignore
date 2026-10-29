@@ -1,0 +1,29 @@
+# 字节码缓存
+__pycache__/
+*.py[cod]
+
+# 打包产物
+build/
+dist/
+*.spec.bak
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 编辑器
+.vscode/
+.idea/
+
+# 运行产物
+*.log
+cue2flac_cli.log
+
+# 测试临时文件
+tests/tmp/
+
+# 本地用于测试的 ffmpeg（CI 会自动下载，勿提交）
+ffmpeg/
+ffmpeg.exe
+ffprobe.exe

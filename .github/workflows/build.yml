@@ -39,7 +39,7 @@ jobs:
       - name: Build onefile EXE (ffmpeg bundled)
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --onefile --name cue2flac --windowed `
+          pyinstaller --noconfirm --onefile --name cue2flac `
             --hidden-import cue2flac `
             --hidden-import cue2flac.cli `
             --hidden-import cue2flac.cue_parser `

@@ -28,7 +28,7 @@ jobs:
         run: |
           # 折行算法（纯计算）+ GUI 布局冒烟（需 tkinter；无显示环境会自动跳过）
           python -m pip install pytest
-          python -m pytest tests/test_layout.py tests/test_gui_smoke.py -q
+          python -m pytest tests/test_layout.py tests/test_gui_smoke.py -q -rs --tb=short
 
       - name: Download ffmpeg (with ffprobe) for Windows
         shell: pwsh

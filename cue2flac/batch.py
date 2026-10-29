@@ -83,6 +83,35 @@ def discover_cues(
     return found
 
 
+def expand_to_cues(paths: List[str], recursive: bool = True) -> List[str]:
+    """把一组拖入的路径（文件 / 文件夹，可混合）展开为去重、排序后的 .cue 路径列表。
+
+    - 路径是 .cue 文件 → 直接纳入；
+    - 路径是文件夹   → 递归（recursive=True）扫描其中的全部 .cue；
+    - 其它文件       → 忽略。
+    返回的均为绝对路径，按小写路径排序。空输入返回空列表。
+    """
+    cues: List[str] = []
+    seen: set[str] = set()
+    for p in paths:
+        if os.path.isfile(p) and p.lower().endswith(".cue"):
+            ap = os.path.abspath(p)
+            if ap not in seen:
+                seen.add(ap)
+                cues.append(ap)
+        elif os.path.isdir(p):
+            try:
+                found = discover_cues(p, recursive=recursive)
+            except Exception:  # noqa: BLE001
+                found = []
+            for f in found:
+                if f not in seen:
+                    seen.add(f)
+                    cues.append(f)
+    cues.sort(key=lambda x: x.lower())
+    return cues
+
+
 def _sanitize(name: str) -> str:
     """把专辑名 / 文件名整理为安全的目录名。"""
     name = (name or "").strip()
@@ -103,47 +132,39 @@ def _unique_out_dir(base: str, used: dict) -> str:
     return f"{base}_{used[base]}"
 
 
-def process_directory(
-    root: str,
-    recursive: bool = True,
+def process_cues(
+    cue_paths: List[str],
     out: Optional[str] = None,
     audio_hint: Optional[str] = None,
     copy_cover: bool = True,
     verify: bool = False,
     on_progress: Optional[Callable[[str], None]] = None,
 ) -> BatchResult:
-    """扫描 root 下的全部 CUE 并批量分轨。
+    """处理一个明确的 CUE 路径列表（已由调用方发现 / 收集）。
+
+    与 process_directory 核心逻辑一致：逐个解析 → 分轨，对解析失败、音频缺失等
+    跳过并记录原因，最终返回 BatchResult 汇总。
 
     参数：
-      root        —— 要扫描的根目录
-      recursive   —— 是否递归遍历子目录
-      out         —— 统一输出根目录；为 None 时每个 CUE 在其所在目录下的
-                     <专辑名> 子文件夹中输出
-      audio_hint —— 统一指定的整轨音频（可选，覆盖 CUE 中 FILE）
+      cue_paths  —— 要处理的 .cue 绝对路径列表
+      out        —— 统一输出根目录；为 None 时每个 CUE 在其所在目录下的
+                    <专辑名> 子文件夹中输出
+      audio_hint—— 统一指定的整轨音频（可选，覆盖 CUE 中 FILE）
       copy_cover —— 是否复制封面
       verify     —— 是否逐样本校验无损
       on_progress—— 进度回调（接受一段文本）
-
-    返回 BatchResult：含扫描总数、成功列表、跳过列表。
     """
     result = BatchResult()
-    try:
-        cues = discover_cues(root, recursive=recursive, on_progress=on_progress)
-    except FileNotFoundError as e:
-        if on_progress:
-            on_progress(f"错误：{e}\n")
-        raise
-
-    result.scanned = len(cues)
-    if not cues:
+    result.scanned = len(cue_paths)
+    if not cue_paths:
         if on_progress:
             on_progress("未发现任何 .cue 文件，无需处理。\n")
         return result
 
     used_out: dict[str, int] = {}
-    for idx, cue in enumerate(cues, 1):
+    for idx, cue in enumerate(cue_paths, 1):
         if on_progress:
-            on_progress(f"\n=== [{idx}/{len(cues)}] {os.path.basename(cue)} ===\n")
+            on_progress(f"\n=== [{idx}/{len(cue_paths)}] {os.path.basename(cue)} ===\n")
 
         # 1) 解析（格式错误 / 编码异常在此捕获并跳过）
         try:
@@ -188,6 +209,41 @@ def process_directory(
     if on_progress:
         on_progress("\n" + format_summary(result))
     return result
+
+
+def process_directory(
+    root: str,
+    recursive: bool = True,
+    out: Optional[str] = None,
+    audio_hint: Optional[str] = None,
+    copy_cover: bool = True,
+    verify: bool = False,
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> BatchResult:
+    """扫描 root 下的全部 CUE 并批量分轨。
+
+    参数：
+      root        —— 要扫描的根目录
+      recursive   —— 是否递归遍历子目录
+      out         —— 统一输出根目录；为 None 时每个 CUE 在其所在目录下的
+                     <专辑名> 子文件夹中输出
+      audio_hint —— 统一指定的整轨音频（可选，覆盖 CUE 中 FILE）
+      copy_cover —— 是否复制封面
+      verify     —— 是否逐样本校验无损
+      on_progress—— 进度回调（接受一段文本）
+
+    返回 BatchResult：含扫描总数、成功列表、跳过列表。
+    """
+    cues = discover_cues(root, recursive=recursive, on_progress=on_progress)
+    # discover_cues 在 root 非法时抛 FileNotFoundError，这里原样向上传播。
+    return process_cues(
+        cues,
+        out=out,
+        audio_hint=audio_hint,
+        copy_cover=copy_cover,
+        verify=verify,
+        on_progress=on_progress,
+    )
 
 
 def format_summary(result: BatchResult) -> str:

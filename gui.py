@@ -1,10 +1,15 @@
-"""简单的 Tkinter 图形界面：选 CUE → 预览曲目 → 一键分轨。
+"""Tkinter 图形界面：单文件分轨 + 批量拖放分轨。
 
-支持把文件 / 文件夹直接拖到输入框或「拖放区」：
-- 拖 .cue 文件 → 加载 CUE
-- 拖音频文件   → 设为整轨音频
-- 拖文件夹     → 设为输出目录
-支持单个、多个文件及整个文件夹的拖入，并带有拖入高亮反馈。
+批量拖放区（「批量处理」标签页）：
+- 把文件夹或 .cue 文件拖入「批量拖放区」，系统自动识别完整路径，递归遍历其中的
+  全部 .cue 文件；
+- 解析后在下方的「解析结果列表」中清晰展示每个 CUE 的专辑、表演者、曲目数量，
+  以及每首曲目的 序号 / 标题 / 表演者 / 时长；
+- 对格式错误或无法解析的 .cue 也会列出并标注原因；
+- 点击「开始批量分轨」后，依据 CUE 信息对相关音频进行无损转换处理，并输出汇总。
+
+单文件标签页同样支持把文件 / 文件夹拖到输入框或「拖放区」（智能识别）。
+拖放基于 Windows 原生 COM IDropTarget（零依赖）；非 Windows 下自动降级为浏览按钮。
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from cue2flac.cue_parser import CueSheet, parse_cue
 from cue2flac.splitter import split
-from cue2flac.batch import process_directory, format_summary
+from cue2flac.batch import process_cues, expand_to_cues
 
 # 拖放为 Windows 原生实现（零依赖）；非 Windows 下 enable_drop 自动空操作。
 try:
@@ -39,22 +44,34 @@ AUDIO_EXTS = {
 DRAG_COLOR = "#f5a623"     # 拖入过程中（橙）
 OK_COLOR = "#2e9e5b"       # 放下成功（绿）
 INVALID_COLOR = "#d9534f"  # 放下被拒绝（红）
+CUE_COLOR = "#1a5fb4"      # 解析结果列表中「CUE 行」
 
 
 def _is_audio(path: str) -> bool:
     return os.path.isfile(path) and os.path.splitext(path)[1].lower() in AUDIO_EXTS
 
 
+def _fmt(seconds) -> str:
+    if seconds is None:
+        return ""
+    m, s = divmod(int(round(seconds)), 60)
+    return f"{m:02d}:{s:02d}"
+
+
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("cue2flac —— CUE 整轨分轨工具")
-        self.geometry("780x540")
+        self.geometry("840x720")
         self.resizable(True, True)
 
+        # 单文件状态
         self.sheet: Optional[CueSheet] = None
         self.audio_path: Optional[str] = None
         self.out_dir: Optional[str] = None
+
+        # 批量状态
+        self.batch_cue_paths: List[str] = []  # 已成功解析、待处理的 CUE 路径
 
         # 记录每个控件的高亮初始状态，便于复位
         self._hl_state: dict[tk.Widget, tuple] = {}
@@ -63,66 +80,71 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------------ 界面
     def _build_widgets(self) -> None:
+        nb = ttk.Notebook(self)
+        nb.pack(fill="both", expand=True, padx=8, pady=(8, 0))
+
+        tab1 = ttk.Frame(nb)
+        nb.add(tab1, text="单文件分轨")
+        self._build_single_tab(tab1)
+
+        tab2 = ttk.Frame(nb)
+        nb.add(tab2, text="批量处理（拖放）")
+        self._build_batch_tab(tab2)
+
+        self.text_log = tk.Text(self, height=9, state="normal")
+        self.text_log.pack(fill="both", expand=True, padx=10, pady=(6, 10))
+
+    # ============================================================ 单文件标签页
+    def _build_single_tab(self, parent) -> None:
         # 外层「拖放区」容器：本身也是智能路由的拖放目标
         zone = ttk.LabelFrame(
-            self,
+            parent,
             text="拖放区 · 可直接把 CUE 文件 / 音频文件 / 文件夹拖到下方输入框（或拖到本区域内自动识别）",
             padding=(10, 6),
         )
-        zone.pack(fill="x", padx=10, pady=(10, 4))
+        zone.pack(fill="x", padx=8, pady=(8, 4))
 
         frm = ttk.Frame(zone, padding=4)
         frm.pack(fill="x")
 
         ttk.Label(frm, text="CUE 文件:").grid(row=0, column=0, sticky="e")
-        self.entry_cue = ttk.Entry(frm, width=62)
+        self.entry_cue = ttk.Entry(frm, width=64)
         self.entry_cue.grid(row=0, column=1, padx=4)
         ttk.Button(frm, text="浏览…", command=self.browse_cue).grid(row=0, column=2)
 
         ttk.Label(frm, text="音频文件:").grid(row=1, column=0, sticky="e")
-        self.entry_audio = ttk.Entry(frm, width=62)
+        self.entry_audio = ttk.Entry(frm, width=64)
         self.entry_audio.grid(row=1, column=1, padx=4)
         ttk.Button(frm, text="浏览…", command=self.browse_audio).grid(row=1, column=2)
 
         ttk.Label(frm, text="输出目录:").grid(row=2, column=0, sticky="e")
-        self.entry_out = ttk.Entry(frm, width=62)
+        self.entry_out = ttk.Entry(frm, width=64)
         self.entry_out.grid(row=2, column=1, padx=4)
         ttk.Button(frm, text="浏览…", command=self.browse_out).grid(row=2, column=2)
 
         cols = ("#", "标题", "表演者", "起点", "终点")
-        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=12)
+        self.tree = ttk.Treeview(parent, columns=cols, show="headings", height=12)
         for c in cols:
             self.tree.heading(c, text=c)
-            self.tree.column(c, width=120 if c in ("标题", "表演者") else 80)
+            self.tree.column(c, width=140 if c in ("标题", "表演者") else 80)
         self.tree.pack(fill="both", expand=True, padx=10, pady=6)
 
         self.btn_start = ttk.Button(
-            self, text="开始分轨", command=self.start, state="disabled"
+            parent, text="开始分轨", command=self.start, state="disabled"
         )
         self.btn_start.pack(pady=4)
 
-        self.btn_batch = ttk.Button(
-            self, text="批量处理文件夹…", command=self.batch_dir
-        )
-        self.btn_batch.pack(pady=(0, 4))
-
-        self.text_log = tk.Text(self, height=8, state="normal")
-        self.text_log.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-
-        # 注册拖放目标
         self._register_drops(zone)
 
     def _register_drops(self, zone) -> None:
         if not enable_drop:
             return
-        # 智能路由：拖到「拖放区」整体，按内容自动分到正确字段
         enable_drop(
             zone,
             on_drop=self._on_smart_drop,
             on_drag_enter=lambda: self._highlight(zone),
             on_drag_leave=lambda: self._unhighlight(zone),
         )
-        # 每个输入框独立作为精确目标
         enable_drop(
             self.entry_cue,
             on_drop=self._on_cue_drop,
@@ -142,7 +164,7 @@ class App(tk.Tk):
             on_drag_leave=lambda: self._unhighlight(self.entry_out),
         )
 
-    # ------------------------------------------------------------- 浏览按钮
+    # ----------------------------------------------------------- 浏览按钮
     def browse_cue(self) -> None:
         path = filedialog.askopenfilename(
             title="选择 CUE 文件", filetypes=[("CUE 文件", "*.cue"), ("所有文件", "*.*")]
@@ -235,7 +257,6 @@ class App(tk.Tk):
             else:
                 self.log(f"无法识别拖入项：{p}\n")
             return
-        # 多项：优先取最有意义的一项
         if cues:
             self._on_cue_drop(cues)
         elif audios:
@@ -354,63 +375,215 @@ class App(tk.Tk):
                 on_progress=self.log,
             )
             self.log("完成！\n")
-            messagebox.showinfo("完成", f"已生成 {len(results)} 个文件：\n{out}")
+            self.after(0, lambda: messagebox.showinfo(
+                "完成", f"已生成 {len(results)} 个文件：\n{out}"))
         except Exception as e:  # noqa: BLE001
             self.log(f"错误：{e}\n")
-            messagebox.showerror("分轨失败", str(e))
+            self.after(0, lambda: messagebox.showerror("分轨失败", str(e)))
         finally:
             self.btn_start.config(state="normal")
 
-    # ----------------------------------------------------- 批量处理文件夹
-    def batch_dir(self) -> None:
-        root = filedialog.askdirectory(title="选择要批量扫描的文件夹（含子目录中的 .cue）")
-        if not root:
-            return
-        self.btn_batch.config(state="disabled")
-        self.btn_start.config(state="disabled")
-        self.log(f"\n开始批量处理：{root}\n")
-        threading.Thread(target=self._run_batch, args=(root,), daemon=True).start()
+    # ============================================================ 批量标签页
+    def _build_batch_tab(self, parent) -> None:
+        # 拖放区标签 + 选择按钮
+        zone = ttk.LabelFrame(
+            parent,
+            text="批量拖放区 · 把「文件夹」或「.cue 文件」拖到这里，自动扫描其中全部 .cue",
+            padding=(10, 8),
+        )
+        zone.pack(fill="x", padx=8, pady=(8, 4))
 
-    def _run_batch(self, root: str) -> None:
+        self._batch_orig_bg = None
+        self.batch_drop_label = tk.Label(
+            zone,
+            text="⬇  将文件夹或多个 .cue 文件拖入此处  ⬇\n（自动递归遍历子目录，发现所有 .cue）",
+            relief="groove",
+            borderwidth=2,
+            padx=12,
+            pady=14,
+            font=("Microsoft YaHei", 11),
+            justify="center",
+        )
+        self.batch_drop_label.pack(fill="x", padx=4, pady=4)
+        self._batch_orig_bg = self.batch_drop_label.cget("bg")
+
+        row = ttk.Frame(zone)
+        row.pack(fill="x", padx=4, pady=(0, 4))
+        ttk.Button(row, text="选择文件夹…", command=self._on_batch_pick).pack(side="left")
+        self.lbl_batch_hint = ttk.Label(
+            row, text="拖入或选择后，下方列表会显示每个 CUE 的解析结果；点击「开始批量分轨」执行转换。"
+        )
+        self.lbl_batch_hint.pack(side="left", padx=8)
+
+        # 解析结果列表（树形：父 = CUE，子 = 曲目）
+        cols = ("来源", "#", "标题", "表演者", "时长")
+        self.batch_tree = ttk.Treeview(parent, columns=cols, show="headings", height=14)
+        self.batch_tree.heading("来源", text="来源 CUE")
+        self.batch_tree.column("来源", width=200)
+        self.batch_tree.heading("#", text="#")
+        self.batch_tree.column("#", width=40, anchor="center")
+        self.batch_tree.heading("标题", text="标题")
+        self.batch_tree.column("标题", width=220)
+        self.batch_tree.heading("表演者", text="表演者")
+        self.batch_tree.column("表演者", width=160)
+        self.batch_tree.heading("时长", text="时长")
+        self.batch_tree.column("时长", width=80, anchor="center")
+
+        vsb = ttk.Scrollbar(parent, orient="vertical", command=self.batch_tree.yview)
+        self.batch_tree.configure(yscrollcommand=vsb.set)
+        self.batch_tree.pack(fill="both", expand=True, padx=10, pady=6, side="left")
+        vsb.pack(fill="y", pady=6, side="right")
+
+        self.btn_batch_start = ttk.Button(
+            parent, text="开始批量分轨", command=self._on_batch_start, state="disabled"
+        )
+        self.btn_batch_start.pack(pady=(0, 4))
+
+        # 注册批量拖放目标
+        if enable_drop:
+            enable_drop(
+                self.batch_drop_label,
+                on_drop=self._on_batch_drop,
+                on_drag_enter=lambda: self._batch_highlight(True),
+                on_drag_over=lambda: self._batch_highlight(True),
+                on_drag_leave=lambda: self._batch_highlight(False),
+            )
+
+    def _batch_highlight(self, on: bool) -> None:
         try:
-            result = process_directory(
-                root,
-                recursive=True,
-                out=None,  # 每个专辑输出到其 CUE 所在目录下的 <专辑名> 子文件夹
+            if on:
+                self.batch_drop_label.config(bg=DRAG_COLOR, fg="white", relief="solid")
+            else:
+                self.batch_drop_label.config(
+                    bg=self._batch_orig_bg, fg="black", relief="groove"
+                )
+        except Exception:
+            pass
+
+    # ----------------------------------------------------- 批量：拖放 / 选择
+    def _on_batch_pick(self) -> None:
+        root = filedialog.askdirectory(title="选择包含 .cue 的文件夹（含子目录）")
+        if root:
+            self._on_batch_drop([root])
+
+    def _on_batch_drop(self, paths: List[str]) -> None:
+        """拖入文件 / 文件夹后：解析路径 → 递归收集全部 .cue → 列出解析结果。"""
+        self._batch_highlight(False)
+        cues = self._collect_cues(paths)
+        if not cues:
+            self.batch_drop_label.config(
+                bg=INVALID_COLOR, fg="white", relief="solid")
+            self.after(900, lambda: self._batch_highlight(False))
+            self.log("拖入的内容中未找到任何 .cue 文件（请拖入文件夹或 .cue 文件）。\n")
+            return
+
+        self.batch_cue_paths = []
+        self._populate_batch_tree(cues)
+        self.btn_batch_start.config(state="normal")
+        self.batch_drop_label.config(bg=OK_COLOR, fg="white", relief="solid")
+        self.after(700, lambda: self._batch_highlight(False))
+        self.log(
+            f"\n已发现并解析 {len(cues)} 个 CUE 文件，解析结果见上方列表。"
+            f"点击「开始批量分轨」依据 CUE 信息转换音频。\n"
+        )
+
+    def _collect_cues(self, paths: List[str]) -> List[str]:
+        """从拖入的项中收集全部 .cue（文件夹递归扫描，文件直接判定），去重并排序。"""
+        return expand_to_cues(paths, recursive=True)
+
+    def _populate_batch_tree(self, cues: List[str]) -> None:
+        """解析每个 CUE 并在结果列表中展示全部内容（含解析失败项）。"""
+        for row in self.batch_tree.get_children():
+            self.batch_tree.delete(row)
+
+        for cue in cues:
+            try:
+                sheet = parse_cue(cue)
+            except Exception as e:  # noqa: BLE001
+                # 解析失败也列出，清晰标注，便于排查
+                self.batch_tree.insert(
+                    "",
+                    "end",
+                    values=(os.path.basename(cue), "", "解析失败", str(e)[:60], ""),
+                    tags=("fail",),
+                )
+                self.log(f"[解析失败] {os.path.basename(cue)} —— {e}\n")
+                continue
+
+            parent = self.batch_tree.insert(
+                "",
+                "end",
+                values=(
+                    os.path.basename(cue),
+                    "",
+                    f"《{sheet.album_title or '未命名'}》",
+                    sheet.album_performer or "",
+                    f"{sheet.total_tracks} 首",
+                ),
+                tags=("cue",),
+                open=True,
+            )
+            for tr in sheet.tracks:
+                dur = (_fmt(tr.end - tr.start)
+                       if tr.end is not None else "到结尾")
+                self.batch_tree.insert(
+                    parent,
+                    "end",
+                    values=(
+                        "",
+                        f"{tr.number:02d}",
+                        tr.title or "",
+                        tr.performer or "",
+                        dur,
+                    ),
+                )
+            # 只有成功解析的才进入待处理列表
+            self.batch_cue_paths.append(os.path.abspath(cue))
+
+        self.batch_tree.tag_configure("fail", foreground=INVALID_COLOR)
+        self.batch_tree.tag_configure("cue", foreground=CUE_COLOR)
+
+    # ----------------------------------------------------- 批量：执行转换
+    def _on_batch_start(self) -> None:
+        if not self.batch_cue_paths:
+            return
+        self.btn_batch_start.config(state="disabled")
+        self.log("\n开始批量转换处理（依据上方 CUE 信息拆分音频）…\n")
+        cue_paths = list(self.batch_cue_paths)
+        threading.Thread(
+            target=self._batch_runner, args=(cue_paths,), daemon=True
+        ).start()
+
+    def _batch_runner(self, cue_paths: List[str]) -> None:
+        try:
+            result = process_cues(
+                cue_paths,
+                out=None,  # 每个 CUE 在其所在目录下的 <专辑名> 子文件夹中输出
+                copy_cover=True,
+                verify=False,
                 on_progress=self.log,
             )
-            # 顶部再打印一次汇总，确保可见
-            self.log("\n" + format_summary(result) + "\n")
             if result.success_count == 0:
-                messagebox.showwarning(
+                self.after(0, lambda: messagebox.showwarning(
                     "批量处理",
-                    f"未成功处理任何 CUE（共扫描 {result.scanned} 个，跳过 {result.skip_count} 个）。\n"
-                    "请查看日志中的跳过原因。",
-                )
+                    f"未成功处理任何 CUE（跳过 {result.skip_count} 个），详见日志。",
+                ))
             else:
-                messagebox.showinfo(
+                self.after(0, lambda: messagebox.showinfo(
                     "批量处理完成",
-                    f"成功 {result.success_count} 个，跳过 {result.skip_count} 个。\n"
-                    "详见日志汇总。",
-                )
+                    f"成功 {result.success_count} 个，跳过 {result.skip_count} 个。\n详见日志汇总。",
+                ))
         except Exception as e:  # noqa: BLE001
             self.log(f"批量处理出错：{e}\n")
-            messagebox.showerror("批量处理出错", str(e))
+            self.after(0, lambda: messagebox.showerror("批量处理出错", str(e)))
         finally:
-            self.btn_batch.config(state="normal")
-            if self.sheet:
-                self.btn_start.config(state="normal")
+            if self.batch_cue_paths:
+                self.btn_batch_start.config(state="normal")
 
+    # --------------------------------------------------------------- 日志
     def log(self, msg: str) -> None:
         self.text_log.insert(tk.END, msg)
         self.text_log.see(tk.END)
-
-
-def _fmt(seconds) -> str:
-    if seconds is None:
-        return ""
-    m, s = divmod(int(seconds), 60)
-    return f"{m:02d}:{s:02d}"
 
 
 def run_gui() -> None:

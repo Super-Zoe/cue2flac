@@ -113,3 +113,44 @@ def test_format_summary_contains_counts(fake_tree, monkeypatch):
     # 成功列表与跳过列表都应出现
     assert os.path.basename("top.cue") in text
     assert os.path.basename("broken.cue") in text
+
+
+def test_expand_to_cues_mixed_inputs(fake_tree):
+    # fake_tree 含：顶层 top.cue（有效）、sub/album.cue（有效）、sub/broken.cue（无 TRACK）
+    # 直接给文件夹 + 直接给一个 .cue 文件 + 一个无关文件
+    extra_cue = os.path.join(fake_tree, "sub", "album.cue")  # 与文件夹扫描重复，应去重
+    noise = os.path.join(fake_tree, "top.cue") + ".bak"      # 非 cue，忽略
+    cues = batch.expand_to_cues([fake_tree, extra_cue, noise], recursive=True)
+    # 3 个不重复的 .cue，且排序
+    assert len(cues) == 3
+    assert cues == sorted(cues, key=lambda p: p.lower())
+    basenames = sorted(os.path.basename(c) for c in cues)
+    assert basenames == ["album.cue", "broken.cue", "top.cue"]
+
+
+def test_expand_to_cues_no_recursive(fake_tree):
+    cues = batch.expand_to_cues([fake_tree], recursive=False)
+    assert len(cues) == 1
+    assert os.path.basename(cues[0]) == "top.cue"
+
+
+def test_expand_to_cues_empty():
+    assert batch.expand_to_cues([]) == []
+    assert batch.expand_to_cues(["/nonexistent/path.cue"]) == []
+
+
+def test_process_cues_explicit_list(fake_tree, monkeypatch):
+    captured = []
+
+    def fake_split(sheet, out_dir, **kwargs):
+        captured.append(out_dir)
+        return ["a.flac", "b.flac"]
+
+    monkeypatch.setattr(batch, "split", fake_split)
+    top = os.path.join(fake_tree, "top.cue")
+    result = batch.process_cues([top], copy_cover=False)
+    assert result.scanned == 1
+    assert result.success_count == 1
+    assert result.skip_count == 0
+    assert result.processed[0].tracks == 2
+

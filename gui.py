@@ -21,6 +21,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from cue2flac.cue_parser import parse_cue
 from cue2flac.batch import process_cues, expand_to_cues
+from cue2flac.config import get_out_dir, set_out_dir
 
 # 拖放为 Windows 原生实现（零依赖）；非 Windows 下 enable_drop 自动空操作。
 try:
@@ -55,6 +56,8 @@ class App(tk.Tk):
         self.batch_cue_paths: List[str] = []
         # 结果树中「CUE 顶层行」的 iid → 对应 CUE 绝对路径（用于逐项删减）
         self._cue_map: dict[str, str] = {}
+        # 用户指定的统一输出目录（None = 使用内置默认：各 CUE 所在目录下的专辑名子文件夹）
+        self.out_dir: Optional[str] = get_out_dir()
 
         self._orig_bg: Optional[str] = None
 
@@ -105,6 +108,26 @@ class App(tk.Tk):
                 on_drag_enter=lambda: self._highlight(True),
                 on_drag_leave=lambda: self._highlight(False),
             )
+
+        # ===== 输出目录 =====
+        out_frame = ttk.LabelFrame(self, text="输出目录", padding=(8, 6))
+        out_frame.pack(fill="x", padx=12, pady=(0, 6))
+
+        row = ttk.Frame(out_frame)
+        row.pack(fill="x", padx=4, pady=2)
+        ttk.Label(row, text="保存到：").pack(side="left")
+        self.out_dir_var = tk.StringVar(value=self.out_dir or "")
+        self.out_entry = ttk.Entry(row, textvariable=self.out_dir_var)
+        self.out_entry.pack(side="left", fill="x", expand=True, padx=6)
+        ttk.Button(row, text="选择…", command=self._pick_out_dir).pack(side="left", padx=4)
+        ttk.Button(row, text="恢复默认", command=self._reset_out_dir).pack(side="left")
+        ttk.Label(
+            out_frame,
+            text=(
+                "留空 = 默认：各 CUE 所在目录下的『专辑名』子文件夹；"
+                "也可指定统一输出根目录（配置会被记住，下次自动复用）。"
+            ),
+        ).pack(anchor="w", padx=4, pady=(2, 0))
 
         # ===== 解析结果列表 =====
         list_frame = ttk.LabelFrame(
@@ -178,6 +201,21 @@ class App(tk.Tk):
         d = filedialog.askdirectory(title="选择包含 .cue 的文件夹（含子目录）")
         if d:
             self._on_drop([d])
+
+    # ----------------------------------------------------- 输出目录选择
+    def _pick_out_dir(self) -> None:
+        d = filedialog.askdirectory(title="选择输出目录")
+        if d:
+            self.out_dir_var.set(d)
+            self.out_dir = d
+            set_out_dir(d)
+            self.log(f"输出目录已设为：{d}\n")
+
+    def _reset_out_dir(self) -> None:
+        self.out_dir_var.set("")
+        self.out_dir = None
+        set_out_dir(None)
+        self.log("已恢复默认输出目录（各 CUE 所在目录下的专辑名子文件夹）。\n")
 
     # ----------------------------------------------------- 拖放 / 选择处理
     def _on_drop(self, paths: List[str]) -> None:
@@ -275,7 +313,7 @@ class App(tk.Tk):
         try:
             result = process_cues(
                 cue_paths,
-                out=None,  # 每个 CUE 在其所在目录下的 <专辑名> 子文件夹中输出
+                out=self.out_dir,  # None = 每个 CUE 在其所在目录下的 <专辑名> 子文件夹中输出
                 copy_cover=True,
                 verify=False,
                 on_progress=self.log,

@@ -63,7 +63,11 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         help="CUE 文件路径；也可传入【目录】，自动批量扫描其中的 .cue 文件",
     )
-    p.add_argument("-o", "--out", help="输出目录；批量模式下作为统一输出根目录")
+    p.add_argument(
+        "-o", "--out",
+        help="输出目录；批量模式下作为统一输出根目录。"
+             "不指定时依次回退：配置文件中的默认值 → 各 CUE 所在目录下的专辑名子文件夹",
+    )
     p.add_argument("-a", "--audio", help="指定整轨音频文件（覆盖 CUE 中 FILE 指向）")
     p.add_argument("--no-cover", action="store_true", help="不复制封面")
     p.add_argument("--verify", action="store_true", help="分轨后校验每条音轨的 PCM 无损")
@@ -91,6 +95,15 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # 未显式指定 -o 时，回退到配置中的默认输出目录（若已设置）。
+    if not args.out:
+        try:
+            from .config import get_out_dir
+
+            args.out = get_out_dir()
+        except Exception:  # noqa: BLE001
+            args.out = None
 
     # 批量模式：位置参数或 --dir 指向目录时，扫描该目录下的全部 .cue
     batch_root = args.dir or (args.cue if args.cue and os.path.isdir(args.cue) else None)

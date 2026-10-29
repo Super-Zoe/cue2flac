@@ -69,7 +69,7 @@ jobs:
               PERFORMER "SmokeTest"
               INDEX 01 00:01:50
           "@ | Set-Content -Encoding ascii test.cue
-          # 用打包好的 exe 执行分轨（窗口化 exe 会把输出写入 exe 同目录的日志，下面会一并打印）
+          # 用打包好的 exe 执行分轨（控制台 exe，输出直接回显；下面会一并检查产物）
           $cuePath = (Resolve-Path test.cue).Path
           ./dist/cue2flac.exe $cuePath -o out --no-cover
           # 若窗口化 exe 产生了日志，打印出来便于排查

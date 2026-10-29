@@ -12,6 +12,18 @@ from .splitter import split, SplitterError
 from . import __version__
 
 
+def configure_stdio() -> None:
+    """把 stdout/stderr 配置为 UTF-8 + errors=replace，避免在非中文代码页的控制台
+    （如 CI 的 cp1252）打印中文时抛 UnicodeEncodeError 而中断分轨。"""
+    for s in (sys.stdout, sys.stderr):
+        if s is None:
+            continue
+        try:
+            s.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+
 def _setup_windowed_logging() -> Optional[str]:
     """便携 EXE（--windowed）下 stdout 为 None，把输出重定向到日志文件并返回其路径。"""
     if getattr(sys, "frozen", False) and sys.stdout is None:
@@ -55,8 +67,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    # 必须在解析参数前重定向：--windowed 打包后 sys.stdout 为 None，
-    # argparse 的 --version/--help 会直接写 sys.stdout，不提前重定向会崩溃。
+    # 必须在解析参数前：① 配置编码安全的 stdio；② 窗口化 exe 下重定向 stdout。
+    configure_stdio()
     log_path = _setup_windowed_logging()
 
     parser = build_parser()

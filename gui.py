@@ -251,8 +251,11 @@ class App(tk.Tk):
             self._relayout()
 
     def _relayout(self) -> None:
-        self._reflow()
-        self._update_wraps()
+        # 折行与换行互相影响（换行宽度会改变控件的请求宽度，进而改变列宽），
+        # 迭代两次让两者收敛，避免出现「换行宽度大于实际宽度」的裁切隐患。
+        for _ in range(2):
+            self._reflow()
+            self._update_wraps()
 
     def _reflow(self) -> None:
         """按钮行在宽度不足时自动折行，避免按钮 / 文字被裁切看不见。
@@ -291,8 +294,9 @@ class App(tk.Tk):
     def _update_wraps(self) -> None:
         for label, pad in getattr(self, "_wrappables", []):
             w = label.winfo_width()
-            if w > pad + 10:
-                label.config(wraplength=max(20, w - pad))
+            if w > 10:
+                # 换行宽度不得超过标签自身宽度，否则文字仍会被裁切看不见
+                label.config(wraplength=min(max(20, w - pad), w))
 
     # ----------------------------------------------------- 选择（浏览回退）
     def _pick_files(self) -> None:

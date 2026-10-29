@@ -91,8 +91,9 @@ def test_buttons_not_clipped_when_window_narrowed(app):
     app._relayout()
     app.update()
 
-    if not app.winfo_ismapped():
-        pytest.skip("缩窄后窗口未映射（无显示环境），跳过几何断言")
+    # 无真实窗口管理器时，改几何后子控件不会重新映射，几何断言无意义 → 跳过
+    if not app.btn_convert.winfo_ismapped():
+        pytest.skip("缩窄后控件未映射（无显示环境），跳过几何断言")
 
     act = app.btn_convert.master
     for widget, label in (

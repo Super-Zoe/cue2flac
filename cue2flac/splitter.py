@@ -14,6 +14,7 @@ from typing import List, Optional
 
 from .cue_parser import CueSheet, Track
 from .ffmpeg_provider import resolve_tool
+from .verify import verify_outputs, format_verification_report
 
 
 class SplitterError(RuntimeError):
@@ -77,20 +78,6 @@ def _run_ffmpeg(cmd, on_progress=None):
         err = proc.stderr.strip() or proc.stdout.strip()
         raise SplitterError(f"ffmpeg 执行失败（退出码 {proc.returncode}）：\n{err[:2000]}")
     return proc
-
-
-def _md5_pcm(path: str, ff: str, start: float, end: Optional[float]) -> str:
-    """把音频区段解码为 s24le 裸 PCM 并求 MD5（用于无损校验）。"""
-    args = [ff, "-nostdin", "-v", "error"]
-    if start:
-        args += ["-ss", f"{start:.6f}"]
-    if end is not None:
-        args += ["-to", f"{end:.6f}"]
-    args += ["-i", path, "-map", "0:a:0?", "-f", "s24le", "-c:a", "pcm_s24le", "-"]
-    proc = subprocess.run(args, capture_output=True)
-    if proc.returncode != 0:
-        return ""
-    return hashlib.md5(proc.stdout).hexdigest()
 
 
 def split(
@@ -164,15 +151,20 @@ def split(
         _run_ffmpeg(cmd, on_progress)
         results.append(out_path)
 
-        if verify:
-            src_md5 = _md5_pcm(tr.file, ff, tr.start, tr.end)
-            out_md5 = _md5_pcm(out_path, ff, 0.0, None)
-            if src_md5 and out_md5 and src_md5 != out_md5:
-                raise SplitterError(
-                    f"校验失败：音轨 {tr.number} 的 PCM 与源不一致（可能源已损坏或非无损）。"
-                )
-            if on_progress and src_md5:
-                on_progress(f"     PCM 校验 OK (md5={src_md5[:12]}…)\n")
+    if verify:
+        if on_progress:
+            on_progress(
+                "开始输出验证：检查可播放性、音频参数匹配与无损一致性…\n"
+            )
+        report = verify_outputs(sheet, results, ff, ffprobe, on_progress)
+        if on_progress:
+            on_progress(format_verification_report(report) + "\n")
+        if not report.all_ok:
+            failed = [os.path.basename(r.out_path) for r in report.results if not r.ok]
+            raise SplitterError(
+                "输出验证未通过（文件可能无法播放、参数不匹配或音质非无损）：\n"
+                + "\n".join(failed)
+            )
 
     if on_progress:
         on_progress(f"完成：已生成 {len(results)} 个文件。\n")

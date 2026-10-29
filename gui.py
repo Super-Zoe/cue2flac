@@ -315,7 +315,7 @@ class App(tk.Tk):
                 cue_paths,
                 out=self.out_dir,  # None = 每个 CUE 在其所在目录下的 <专辑名> 子文件夹中输出
                 copy_cover=True,
-                verify=False,
+                verify=True,  # 转换完成后逐文件验证：可播放 / 参数匹配 / 无损无截断
                 on_progress=self.log,
             )
             success = result.success_count
@@ -328,7 +328,8 @@ class App(tk.Tk):
             else:
                 self.after(0, lambda: messagebox.showinfo(
                     "转换完成",
-                    f"成功 {success} 个，跳过 {skip} 个。\n详见日志汇总。",
+                    f"成功 {success} 个，跳过 {skip} 个。\n"
+                    f"已对输出 FLAC 做播放 / 参数 / 无损验证（详见日志）。",
                 ))
             self.after(0, lambda: self.status_label.config(
                 text=f"处理完成：成功 {success} 个，跳过 {skip} 个"

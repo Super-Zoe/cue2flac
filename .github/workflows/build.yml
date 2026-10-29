@@ -46,6 +46,7 @@ jobs:
             --hidden-import cue2flac.splitter `
             --hidden-import cue2flac.ffmpeg_provider `
             --hidden-import tkinter `
+            --hidden-import dnd `
             --add-binary "ffmpeg.exe;ffmpeg" `
             --add-binary "ffprobe.exe;ffmpeg" `
             main.py

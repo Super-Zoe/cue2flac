@@ -53,6 +53,8 @@ class App(tk.Tk):
 
         # 已成功解析、待处理的 CUE 路径
         self.batch_cue_paths: List[str] = []
+        # 结果树中「CUE 顶层行」的 iid → 对应 CUE 绝对路径（用于逐项删减）
+        self._cue_map: dict[str, str] = {}
 
         self._orig_bg: Optional[str] = None
 
@@ -132,6 +134,16 @@ class App(tk.Tk):
         self.tree.pack(fill="both", expand=True, padx=4, pady=4, side="left")
         vsb.pack(fill="y", pady=4, side="right")
 
+        # 逐项删减：右键菜单、Delete 键、选中态联动「删除选中」按钮
+        self.tree.bind("<Button-3>", self._on_tree_right_click)
+        self.tree.bind("<Delete>", self._delete_selected)
+        self.tree.bind(
+            "<<TreeviewSelect>>",
+            lambda e: self.btn_delete.config(
+                state="normal" if self.tree.selection() else "disabled"
+            ),
+        )
+
         # ===== 转换操作 =====
         act = ttk.Frame(self)
         act.pack(fill="x", padx=12, pady=(0, 6))
@@ -139,7 +151,15 @@ class App(tk.Tk):
             act, text="开始转换", command=self._on_convert, state="disabled"
         )
         self.btn_convert.pack(side="left")
+        self.btn_delete = ttk.Button(
+            act, text="删除选中", command=self._delete_selected, state="disabled"
+        )
+        self.btn_delete.pack(side="left", padx=6)
         ttk.Button(act, text="清空", command=self._clear).pack(side="left", padx=6)
+        self.lbl_hint = ttk.Label(
+            act, text="（右键条目可移除；内容过长时拖动右侧滚动条浏览）"
+        )
+        self.lbl_hint.pack(side="left", padx=12)
 
         # ===== 日志 =====
         self.text_log = tk.Text(self, height=9, state="normal")
@@ -186,6 +206,7 @@ class App(tk.Tk):
         """解析每个 CUE 并在结果列表中展示全部内容（含解析失败项）。"""
         for row in self.tree.get_children():
             self.tree.delete(row)
+        self._cue_map.clear()
 
         for cue in cues:
             try:
@@ -233,6 +254,7 @@ class App(tk.Tk):
                 )
             # 只有成功解析的才进入待处理列表
             self.batch_cue_paths.append(os.path.abspath(cue))
+            self._cue_map[parent] = os.path.abspath(cue)
 
         self.tree.tag_configure("cue", foreground=CUE_COLOR)
         self.tree.tag_configure("fail", foreground=FAIL_COLOR)
@@ -286,9 +308,68 @@ class App(tk.Tk):
         for row in self.tree.get_children():
             self.tree.delete(row)
         self.batch_cue_paths = []
+        self._cue_map.clear()
         self.btn_convert.config(state="disabled")
+        self.btn_delete.config(state="disabled")
         self.status_label.config(text="等待拖入或选择…")
         self.text_log.delete("1.0", tk.END)
+
+    # ----------------------------------------------------- 逐项删减
+    def _resolve_cue_iid(self, iid: str) -> Optional[str]:
+        """把任意选中的行解析为其所属的 CUE 顶层行 iid（曲目子行归并到父 CUE）。"""
+        if not iid or not self.tree.exists(iid):
+            return None
+        parent = self.tree.parent(iid)
+        return parent if parent else iid
+
+    def _remove_cue(self, cue_iid: str) -> None:
+        """从结果列表与待处理列表中移除一个 CUE 条目（含其全部曲目子行）。"""
+        if not cue_iid or not self.tree.exists(cue_iid):
+            return
+        path = self._cue_map.pop(cue_iid, None)
+        for child in self.tree.get_children(cue_iid):
+            self.tree.delete(child)
+        self.tree.delete(cue_iid)
+        if path and path in self.batch_cue_paths:
+            self.batch_cue_paths.remove(path)
+        if not self.batch_cue_paths:
+            self.btn_convert.config(state="disabled")
+        self.btn_delete.config(
+            state="normal" if self.tree.selection() else "disabled"
+        )
+        self.status_label.config(
+            text=f"已移除 1 个条目，剩余 {len(self.batch_cue_paths)} 个待处理"
+        )
+        self.log(f"已移除条目：{os.path.basename(path) if path else cue_iid}\n")
+
+    def _delete_selected(self, event=None) -> None:
+        """删除当前选中的条目（可多选；曲目子行会自动归并到所属 CUE）。"""
+        sel = self.tree.selection()
+        if not sel:
+            return
+        cue_ids: List[str] = []
+        for s in sel:
+            cid = self._resolve_cue_iid(s)
+            if cid and cid not in cue_ids:
+                cue_ids.append(cid)
+        for cid in cue_ids:
+            self._remove_cue(cid)
+
+    def _on_tree_right_click(self, event) -> None:
+        """右键弹出菜单：移除该 CUE 条目。"""
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        self.tree.selection_set(iid)
+        cid = self._resolve_cue_iid(iid)
+        if not cid:
+            return
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(
+            label="移除该 CUE 条目",
+            command=lambda: self._remove_cue(cid),
+        )
+        menu.post(event.x_root, event.y_root)
 
     # ----------------------------------------------------- 高亮反馈
     def _highlight(self, on: bool) -> None:

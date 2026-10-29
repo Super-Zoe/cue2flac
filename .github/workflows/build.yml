@@ -23,11 +23,6 @@ jobs:
       - name: Install PyInstaller
         run: python -m pip install --upgrade pip pyinstaller
 
-      - name: Debug GUI widget state
-        shell: pwsh
-        run: |
-          python -c "import sys; sys.path.insert(0,'.'); from gui import App; app=App(); app.update(); print('root_mapped', app.winfo_ismapped(), 'geo', app.winfo_geometry()); [print(n, '| mapped', getattr(app,n).winfo_ismapped(), '| geo', getattr(app,n).winfo_geometry(), '| grid', getattr(app,n).grid_info(), '| parent', getattr(app,n).winfo_parent()) for n in ('btn_convert','btn_clear','btn_files','btn_folder','out_entry')]"
-
       - name: Layout & GUI smoke tests
         shell: pwsh
         run: |

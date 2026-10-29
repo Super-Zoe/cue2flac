@@ -69,9 +69,17 @@ jobs:
               PERFORMER "SmokeTest"
               INDEX 01 00:01:50
           "@ | Set-Content -Encoding ascii test.cue
-          # 用打包好的 exe 执行分轨
-          ./dist/cue2flac.exe test.cue -o out --no-cover
+          # 用打包好的 exe 执行分轨（窗口化 exe 会把输出写入 exe 同目录的日志，下面会一并打印）
+          $cuePath = (Resolve-Path test.cue).Path
+          ./dist/cue2flac.exe $cuePath -o out --no-cover
+          # 若窗口化 exe 产生了日志，打印出来便于排查
+          $log = Join-Path dist cue2flac_cli.log
+          if (Test-Path $log) { Write-Host "=== cue2flac_cli.log ==="; Get-Content $log }
           # 校验：必须产出两首非空 FLAC
+          if (-not (Test-Path out)) {
+            Write-Error "输出目录 out 未生成，分轨失败"
+            exit 1
+          }
           $files = Get-ChildItem out -Filter *.flac
           if ($files.Count -ne 2) {
             Write-Error "期望生成 2 个 FLAC，实际 $($files.Count) 个"

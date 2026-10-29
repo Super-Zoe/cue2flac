@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import os
 import sys
 
 
 def main() -> None:
-    # 打包后把工作目录切到 exe 所在目录，保证相对资源（如内嵌 ffmpeg）可定位
-    if getattr(sys, "frozen", False):
-        os.chdir(os.path.dirname(sys.executable))
+    # 注意：不要在这里 chdir 到 exe 目录。ffmpeg_provider 通过 _MEIPASS / __file__
+    # 用绝对路径定位 ffmpeg，与 cwd 无关；而用户输入的相对 CUE/音频路径必须基于
+    # 启动时的 cwd 解析，chdir 会让相对路径失效。
 
     if len(sys.argv) > 1:
         from cue2flac.cli import main as cli_main

@@ -8,6 +8,12 @@
 - 点击「开始转换」后，依据各 CUE 文件中的信息对相关音频执行转换处理。
 
 拖放基于 Windows 原生 COM IDropTarget（零依赖）；非 Windows 下自动降级为浏览按钮。
+
+布局要点（防止缩小后元素看不见）：
+- 整体内容放进一个「可滚动画布」中；窗口缩小时，下半部分（输出目录 / 结果列表 /
+  按钮 / 日志）不会消失，而是出现右侧滚动条，可滚动到达。
+- 按钮行在宽度不足时自动折行（grid 动态重排），长文字标签自动换行（wraplength），
+  避免横向缩小后文字被裁切。
 """
 
 from __future__ import annotations
@@ -50,7 +56,9 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("cue2flac —— 拖放批量分轨")
-        self.geometry("940x720")
+        # 默认尺寸足够容纳全部内容（无滚动条）；最小尺寸防止被缩成不可用的窄条。
+        self.geometry("980x860")
+        self.minsize(520, 380)
         self.resizable(True, True)
 
         # 已成功解析、待处理的 CUE 路径
@@ -72,8 +80,28 @@ class App(tk.Tk):
 
     # ------------------------------------------------------------------ 界面
     def _build_widgets(self) -> None:
+        # ===== 可滚动外层 =====
+        # 把全部内容放进一个画布窗口中：窗口缩小时，下方内容（输出目录 / 结果列表 /
+        # 转换按钮 / 日志）不再被裁切消失，而是出现右侧滚动条，可滚动到达。
+        self.vsb = ttk.Scrollbar(self, orient="vertical")
+        self.vsb.pack(side="right", fill="y")
+        self.canvas = tk.Canvas(self, highlightthickness=0)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.canvas.configure(yscrollcommand=self.vsb.set)
+        self.body = ttk.Frame(self.canvas)
+        self._win = self.canvas.create_window(
+            (0, 0), window=self.body, anchor="nw"
+        )
+        # 内容尺寸变化 → 更新滚动范围；画布尺寸变化 → 让 body 跟随宽度并重新排布。
+        self.body.bind("<Configure>", lambda e: self._sync_scrollregion())
+        self.canvas.bind("<Configure>", self._on_canvas_resize)
+        # 鼠标滚轮：悬停在结果列表上滚动列表本身；其它区域滚动整个窗口。
+        self.canvas.bind("<MouseWheel>", self._on_mousewheel)
+
+        parent = self.body  # 以下所有分区都放进可滚动的 body
+
         # ===== 唯一的输入：拖放区域 =====
-        zone = ttk.LabelFrame(self, text="拖放区域", padding=(12, 10))
+        zone = ttk.LabelFrame(parent, text="拖放区域", padding=(12, 10))
         zone.pack(fill="x", padx=12, pady=(12, 6))
 
         self.drop_label = tk.Label(
@@ -128,7 +156,7 @@ class App(tk.Tk):
             )
 
         # ===== 输出目录 =====
-        out_frame = ttk.LabelFrame(self, text="输出目录", padding=(8, 6))
+        out_frame = ttk.LabelFrame(parent, text="输出目录", padding=(8, 6))
         out_frame.pack(fill="x", padx=12, pady=(0, 6))
 
         row = ttk.Frame(out_frame)
@@ -160,13 +188,13 @@ class App(tk.Tk):
 
         # ===== 解析结果列表 =====
         list_frame = ttk.LabelFrame(
-            self, text="解析结果（文件名 · 路径 · 专辑 / 表演者 · 曲目明细）", padding=(8, 6)
+            parent, text="解析结果（文件名 · 路径 · 专辑 / 表演者 · 曲目明细）", padding=(8, 6)
         )
         list_frame.pack(fill="both", expand=True, padx=12, pady=(4, 6))
 
         cols = ("路径", "专辑", "表演者", "时长", "曲目数")
         self.tree = ttk.Treeview(
-            list_frame, columns=cols, show="tree headings", height=16
+            list_frame, columns=cols, show="tree headings", height=14
         )
         self.tree.heading("#0", text="文件名")
         self.tree.column("#0", width=280, anchor="w")
@@ -190,6 +218,8 @@ class App(tk.Tk):
         hsb.grid(row=1, column=0, sticky="ew", padx=4, pady=(0, 4))
         list_frame.grid_rowconfigure(0, weight=1)
         list_frame.grid_columnconfigure(0, weight=1)
+        # 列表自身的鼠标滚轮（滚动列表，并阻止事件冒泡到外层画布）
+        self.tree.bind("<MouseWheel>", self._on_tree_mousewheel)
 
         # 逐项删减：右键菜单、Delete 键、选中态联动「删除选中」按钮
         self.tree.bind("<Button-3>", self._on_tree_right_click)
@@ -202,7 +232,7 @@ class App(tk.Tk):
         )
 
         # ===== 转换操作 =====
-        act = ttk.Frame(self)
+        act = ttk.Frame(parent)
         act.pack(fill="x", padx=12, pady=(0, 6))
         self.btn_convert = ttk.Button(
             act, text="开始转换", command=self._on_convert, state="disabled"
@@ -227,7 +257,7 @@ class App(tk.Tk):
         )
 
         # ===== 日志 =====
-        self.text_log = tk.Text(self, height=9, state="normal")
+        self.text_log = tk.Text(parent, height=8, state="normal")
         self.text_log.pack(fill="both", expand=True, padx=12, pady=(0, 10))
 
         # 记录需要随窗口缩小自动换行的长文字标签：(控件, 额外边距)
@@ -244,7 +274,51 @@ class App(tk.Tk):
         # 这里立即排布一次，确保窗口一出现所有控件就可见；尺寸就绪后会再重排。
         self._reflow()
 
-    # ----------------------------------------------------- 自适应布局（防止缩小时文字被裁切）
+    # ----------------------------------------------------- 滚动 / 自适应
+    def _sync_scrollregion(self) -> None:
+        """内容（含新增结果行）尺寸变化时，刷新画布滚动范围。"""
+        try:
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_canvas_resize(self, event) -> None:
+        """画布（视口）尺寸变化时：让 body 跟随画布宽度，高度取自然高度与视口的较大者。
+
+        - 视口更高：多余高度交给列表 / 日志拉伸填充，无底部空白；
+        - 视口更矮：保持自然高度，出现外层滚动条，所有元素仍可滚动到达（不裁切消失）。
+        """
+        if getattr(self, "_resizing_canvas", False):
+            return
+        self._resizing_canvas = True
+        try:
+            cw = self.canvas.winfo_width()
+            ch = self.canvas.winfo_height()
+            if cw < 2 or ch < 2:
+                return
+            # 先按当前画布宽度排布，得到真实的自然高度
+            self.canvas.itemconfigure(self._win, width=cw)
+            self.update_idletasks()
+            req = self.body.winfo_reqheight()
+            h = max(req, ch)
+            self.canvas.itemconfigure(self._win, height=h)
+            self._relayout()
+        finally:
+            self._resizing_canvas = False
+
+    def _on_mousewheel(self, event) -> None:
+        """外层滚轮：滚动整个窗口（仅当确有可滚动内容时）。"""
+        try:
+            if self.canvas.bbox("all") and self.canvas.winfo_height() < self.body.winfo_reqheight():
+                self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_tree_mousewheel(self, event) -> str:
+        """列表区域滚轮：滚动结果列表自身，并阻止事件冒泡到外层画布。"""
+        self.tree.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        return "break"
+
     def _on_resize(self, event) -> None:
         # 仅响应根窗口本身的尺寸变化（子控件的事件会冒泡上来，需过滤）
         if event.widget is self:

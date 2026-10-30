@@ -140,3 +140,36 @@ def test_long_labels_wrap_when_narrowed(app):
         assert wrap <= max(label.winfo_width(), 1), (
             f"{name} 换行宽度 {wrap} 超过自身宽 {label.winfo_width()}"
         )
+
+
+def test_sections_reachable_when_window_short(app):
+    """窗口缩得很矮时，下半部分（输出目录 / 结果 / 按钮 / 日志）不会被裁切消失。
+
+    回归点：以前这些分区直接 pack 进根窗口，窗口变矮后它们被推出可视区且无法到达；
+    现在放进可滚动画布，缩矮后它们仍被 Tk 保持 realized（可映射），并由右侧滚动条到达。
+    """
+    app.geometry("980x400")
+    app.update()
+    app._relayout()
+    app.update()
+
+    # 无真实窗口管理器时，几何 / 映射断言无意义 → 跳过
+    if not app.canvas.winfo_ismapped():
+        pytest.skip("缩矮后画布未映射（无显示环境），跳过断言")
+
+    # 外层滚动条必须存在
+    assert app.vsb.winfo_ismapped(), "垂直滚动条未映射"
+    # 下半部分控件仍被 Tk 保持 realized（未因窗口变矮而被销毁 / 取消映射）
+    for widget, label in (
+        (app.out_entry, "输出目录输入框"),
+        (app.tree, "解析结果列表"),
+        (app.btn_convert, "开始转换"),
+        (app.text_log, "日志"),
+    ):
+        assert widget.winfo_ismapped(), f"{label} 未映射（被裁切消失）"
+
+    # 内容确实高于视口：滚动范围底部超出画布底部，说明滚动条确实可用
+    bbox = app.canvas.bbox("all")
+    assert bbox is not None, "画布滚动范围为空"
+    _, _, _, bottom = bbox
+    assert bottom > app.canvas.winfo_height(), "内容未超出视口，无需滚动"

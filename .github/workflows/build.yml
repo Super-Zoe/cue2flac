@@ -3,6 +3,14 @@ name: Build portable EXE
 on:
   push:
     branches: [main]
+    # 仅当源码/打包相关文件变动时才触发构建；纯文档（README/USAGE 等）改动不打包
+    paths:
+      - 'cue2flac/**'
+      - 'gui.py'
+      - 'dnd.py'
+      - 'main.py'
+      - 'tests/**'
+      - '.github/workflows/build.yml'
   workflow_dispatch:
 
 permissions:

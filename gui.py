@@ -87,6 +87,11 @@ class App(tk.Tk):
         self.vsb.pack(side="right", fill="y")
         self.canvas = tk.Canvas(self, highlightthickness=0)
         self.canvas.pack(side="left", fill="both", expand=True)
+        # 关键修复：滚动条必须能「反向驱动」画布滚动。
+        # 仅设 yscrollcommand（画布→滚动条，负责更新滑块位置）还不够；
+        # 缺少 command（滚动条→画布，拖滑块/点箭头时通知画布滚动）会导致
+        # 滑块看得到却拖不动。两个方向都要接上，拖拽交互才完整可用。
+        self.vsb.config(command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.vsb.set)
         self.body = ttk.Frame(self.canvas)
         self._win = self.canvas.create_window(

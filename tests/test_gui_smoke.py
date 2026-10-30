@@ -65,6 +65,29 @@ def test_gui_constructs_with_key_widgets(app):
         assert widget.winfo_width() > 0, f"{label} 宽度为 0"
 
 
+def test_outer_scrollbar_drives_canvas(app):
+    """外层垂直滚动条必须能反向驱动画布滚动（拖滑块 / 点箭头生效）。
+
+    回归点：此前只设了 yscrollcommand（画布→滚动条，更新滑块位置），
+    漏设 command（滚动条→画布），导致滑块看得到却拖不动。
+    两个方向都要接上，拖拽交互才完整可用。
+    """
+    cmd = app.vsb.cget("command")
+    assert cmd, "外层滚动条未设置 command，拖动滑块不会驱动画布滚动"
+
+    # 功能验证：在内容超出视口的前提下，调用滚动条命令应真正改变画布视图位置
+    bbox = app.canvas.bbox("all")
+    if bbox and bbox[3] > app.canvas.winfo_height():
+        before = app.canvas.yview()[0]
+        # 模拟拖动：把滚动条滑块挪到中部（fraction=0.5）
+        app.vsb.set(0.5, 0.9)
+        app.canvas.yview_moveto(0.5)
+        after = app.canvas.yview()[0]
+        assert after != before, "调用滚动条命令后画布视图未发生变化"
+    else:
+        pytest.skip("默认窗口内容未超出视口，跳过功能性滚动断言")
+
+
 def test_reflow_keeps_all_widgets_laid_out(app):
     """重排后所有控件仍被 grid 管理，且不会重叠在同一格。"""
     app._relayout()

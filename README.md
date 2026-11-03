@@ -261,10 +261,15 @@ pip install -r requirements.txt   # 含 pytest 等
 python -m pytest -q                # 运行全部测试
 ```
 
-- `tests/test_cue_parser.py`、`test_batch.py`、`test_verify.py`：纯逻辑单测，无需界面即可运行。
+- `tests/test_cue_parser.py`、`test_batch.py`、`test_verify.py`、`test_splitter.py`：纯逻辑单测，无需界面即可运行。
 - `tests/test_layout.py`：按钮折行算法的纯函数测试。
 - `tests/test_gui_smoke.py`：GUI 布局冒烟（构造窗口、控件可见性、缩窄不裁切、滚动条可驱动画布等）；**需要 tkinter 与显示环境**，无显示环境时自动跳过。
-- CI 在打包前会先跑 `test_layout.py` 与 `test_gui_smoke.py`，打包后还会做端到端分轨冒烟 + 批量扫描冒烟，确保产物可用。
+- `tests/test_workflow.py`：工作流静态校验——YAML 可解析、步骤名无歧义冒号、`paths` 过滤未被误删、pwsh 步骤能被 PowerShell 解析器无错解析。
+- CI 在打包前会跑 `test_layout.py`、`test_gui_smoke.py` 与 `test_workflow.py`，打包后还会做**多格式端到端分轨冒烟**：
+  - 逐一断言 `wav / flac / ape / dsf / dff` 的 **ffmpeg 解码器可用**（分轨链路与格式无关，唯一格式相关项即解码器）；
+  - 对 ffmpeg **能编码**的格式（wav、flac、wavpack、tta）生成真实样本并跑完整分轨，断言产出 2 首 FLAC；
+  - 断言 CUE 解析出的音源与预期扩展名一致，避免「文件缺失时静默回退到同名其它格式」造成的假通过；
+  - 另有批量扫描冒烟（成功 2 个专辑 / 跳过 1 个损坏 CUE）。
 
 ---
 

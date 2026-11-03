@@ -73,16 +73,21 @@ def test_push_filter_only_builds_on_source_changes():
 
 
 def test_smoke_test_covers_multiple_formats():
-    """冒烟测试应覆盖 wav/flac/ape 三种 PCM 源码，并校验 DSD 解码器可用。"""
+    """冒烟测试应覆盖多种输入格式，并逐一校验目标格式的解码器可用。"""
     data = _load()
     runs = "\n".join(
         str(step.get("run", ""))
         for job in data["jobs"].values()
         for step in job.get("steps", [])
     )
-    for token in ("test.wav", "test.flac", "test.ape"):
-        assert token in runs, f"冒烟测试未覆盖 {token}"
-    assert "dsf" in runs and "dff" in runs, "冒烟测试未校验 DSD(dsf/dff) 解码器"
+    # 目标输入格式必须全部出现在解码器校验清单中
+    for fmt in ("wav", "flac", "ape", "dsf", "dff"):
+        assert fmt in runs, f"冒烟测试未校验 {fmt} 解码器"
+    # 可编码格式须做真实端到端分轨
+    assert "master.wav" in runs, "冒烟测试未生成母带"
+    assert "Split-Cue" in runs, "冒烟测试未执行分轨调用"
+    # 必须断言源码按预期扩展名解析，防止静默回退造成的假通过
+    assert "Escape($audioFile)" in runs, "冒烟测试缺少源码解析一致性断言"
 
 
 CHECKER = r"""

@@ -79,29 +79,45 @@ jobs:
           # 生成 3 秒静音立体声母带
           ./ffmpeg.exe -f lavfi -i anullsrc=r=44100:cl=stereo -t 3 -y master.wav
 
-          # ① 目标格式必须全部具备「解复用器 + 解码器」
+          # ① 目标格式必须全部具备「容器解析 + 解码」能力
           #    cue2flac 的分轨链路与格式无关：解码 → 按 INDEX 切段 → FLAC 编码，
           #    唯一与格式相关的是 ffmpeg 的容器解析与解码能力。APE / DSD 只有解码器、
           #    没有编码器，无法在 CI 内合成样本，故以能力可用性作为它们的准入门槛。
-          #    注意：WAV 由 pcm_* 解码器处理（无独立的 "wav" 解码器）；
-          #          DSF/DFF 的解码器名为 dsd / dsd_lsbf / dsd_msbf，
-          #          容器名分别是 dsf 与 dsdiff（DSDIFF，即 .dff 文件）。
-          $demuxers = ./ffmpeg.exe -hide_banner -demuxers 2>$null | Out-String
-          $decoders = ./ffmpeg.exe -hide_banner -decoders 2>$null | Out-String
+          #    用 `ffmpeg -h <kind>=<name>` 直接查内部注册表（比解析列表文本更可靠），
+          #    并排除输出中的 "Unknown" 以确认目标确实存在。
+          function Test-FfmpegHas($kind, $names) {
+            foreach ($n in $names) {
+              $probe = ./ffmpeg.exe -hide_banner -h "$kind=$n" 2>&1 | Out-String
+              if (($LASTEXITCODE -eq 0) -and ($probe -notmatch 'Unknown')) { return $true }
+            }
+            return $false
+          }
+
+          # 打印相关条目便于排查（容器 / 解码器名称并非总与文件扩展名一致）
+          Write-Host "---- 相关 demuxer ----"
+          ((./ffmpeg.exe -hide_banner -demuxers 2>$null | Out-String) -split "`n") |
+            Where-Object { $_ -match 'ds|ape|flac|wav' } |
+            ForEach-Object { Write-Host ("  " + $_.Trim()) }
+          Write-Host "---- 相关 decoder ----"
+          ((./ffmpeg.exe -hide_banner -decoders 2>$null | Out-String) -split "`n") |
+            Where-Object { $_ -match 'ds|ape|flac|pcm_s16' } |
+            ForEach-Object { Write-Host ("  " + $_.Trim()) }
+          Write-Host "-------------------------"
+
           $req = @(
-            @{ fmt = 'wav';  demux = '\bwav\b';              dec = '\bpcm_s16le\b' },
-            @{ fmt = 'flac'; demux = '\bflac\b';             dec = '\bflac\b' },
-            @{ fmt = 'ape';  demux = '\bape\b';              dec = '\bape\b' },
-            @{ fmt = 'dsf';  demux = '\bdsf\b';              dec = '\bdsd(_lsbf|_msbf)?\b' },
-            @{ fmt = 'dff';  demux = '\bdsdiff\b';          dec = '\bdsd(_lsbf|_msbf)?\b' }
+            @{ fmt = 'wav';  demux = @('wav');    dec = @('pcm_s16le') },
+            @{ fmt = 'flac'; demux = @('flac');   dec = @('flac') },
+            @{ fmt = 'ape';  demux = @('ape');    dec = @('ape') },
+            @{ fmt = 'dsf';  demux = @('dsf');    dec = @('dsd_lsbf', 'dsd', 'dsd_msbf') },
+            @{ fmt = 'dff';  demux = @('dsdiff'); dec = @('dsd_lsbf', 'dsd', 'dsd_msbf') }
           )
           foreach ($r in $req) {
-            if ($demuxers -notmatch $r.demux) {
-              Write-Error "ffmpeg 缺少 $($r.fmt) 解复用器，该输入格式无法处理"
+            if (-not (Test-FfmpegHas 'demuxer' $r.demux)) {
+              Write-Error "ffmpeg 缺少 $($r.fmt) 容器解析能力（$($r.demux -join '/')）"
               exit 1
             }
-            if ($decoders -notmatch $r.dec) {
-              Write-Error "ffmpeg 缺少 $($r.fmt) 解码器，该输入格式无法处理"
+            if (-not (Test-FfmpegHas 'decoder' $r.dec)) {
+              Write-Error "ffmpeg 缺少 $($r.fmt) 解码器（$($r.dec -join '/')）"
               exit 1
             }
             Write-Host "format OK: $($r.fmt)"

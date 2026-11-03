@@ -86,9 +86,11 @@ def test_smoke_test_covers_multiple_formats():
     # 容器解析与解码能力要分别校验（WAV 无独立解码器；DSD 解码器名为 dsd*）
     assert "-demuxers" in runs, "冒烟测试未校验容器解复用器"
     assert "-decoders" in runs, "冒烟测试未校验解码器"
+    # 能力探测用 `ffmpeg -h <kind>=<name>` 查注册表，而非解析列表文本
+    assert "Test-FfmpegHas" in runs, "冒烟测试未使用注册表探测方式"
     # ffmpeg 的容器名与文件扩展名并不总是一致：.dff 走 dsdiff 解复用器，DSD 解码器名为 dsd*
     assert "dsdiff" in runs, "冒烟测试未使用正确的 DSDIFF 解复用器名"
-    assert "dsd(_lsbf|_msbf)?" in runs, "冒烟测试未使用正确的 DSD 解码器名"
+    assert "dsd_lsbf" in runs, "冒烟测试未使用正确的 DSD 解码器名"
     # 可编码格式须做真实端到端分轨
     assert "master.wav" in runs, "冒烟测试未生成母带"
     assert "Split-Cue" in runs, "冒烟测试未执行分轨调用"

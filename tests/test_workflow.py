@@ -80,9 +80,12 @@ def test_smoke_test_covers_multiple_formats():
         for job in data["jobs"].values()
         for step in job.get("steps", [])
     )
-    # 目标输入格式必须全部出现在解码器校验清单中
+    # 目标输入格式必须全部出现在能力校验清单中
     for fmt in ("wav", "flac", "ape", "dsf", "dff"):
-        assert fmt in runs, f"冒烟测试未校验 {fmt} 解码器"
+        assert fmt in runs, f"冒烟测试未校验 {fmt} 格式能力"
+    # 容器解析与解码能力要分别校验（WAV 无独立解码器；DSD 解码器名为 dsd*）
+    assert "-demuxers" in runs, "冒烟测试未校验容器解复用器"
+    assert "-decoders" in runs, "冒烟测试未校验解码器"
     # 可编码格式须做真实端到端分轨
     assert "master.wav" in runs, "冒烟测试未生成母带"
     assert "Split-Cue" in runs, "冒烟测试未执行分轨调用"

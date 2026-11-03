@@ -79,17 +79,31 @@ jobs:
           # 生成 3 秒静音立体声母带
           ./ffmpeg.exe -f lavfi -i anullsrc=r=44100:cl=stereo -t 3 -y master.wav
 
-          # ① 目标格式必须全部具备解码能力
+          # ① 目标格式必须全部具备「解复用器 + 解码器」
           #    cue2flac 的分轨链路与格式无关：解码 → 按 INDEX 切段 → FLAC 编码，
-          #    唯一与格式相关的是 ffmpeg 的「解码器」。APE / DSD 只有解码器、没有编码器，
-          #    无法在 CI 内合成样本，因此以解码器可用性作为它们的准入门槛。
+          #    唯一与格式相关的是 ffmpeg 的容器解析与解码能力。APE / DSD 只有解码器、
+          #    没有编码器，无法在 CI 内合成样本，故以能力可用性作为它们的准入门槛。
+          #    注意：WAV 由 pcm_* 解码器处理（无独立的 "wav" 解码器），
+          #          DSF/DFF 的解码器名为 dsd / dsd_lsbf / dsd_msbf（容器名才是 dsf / dff）。
+          $demuxers = ./ffmpeg.exe -hide_banner -demuxers 2>$null | Out-String
           $decoders = ./ffmpeg.exe -hide_banner -decoders 2>$null | Out-String
-          foreach ($fmt in @('wav', 'flac', 'ape', 'dsf', 'dff')) {
-            if ($decoders -notmatch "\b$fmt\b") {
-              Write-Error "ffmpeg 缺少 $fmt 解码器，该输入格式无法处理"
+          $req = @(
+            @{ fmt = 'wav';  demux = '\bwav\b';              dec = '\bpcm_s16le\b' },
+            @{ fmt = 'flac'; demux = '\bflac\b';             dec = '\bflac\b' },
+            @{ fmt = 'ape';  demux = '\bape\b';              dec = '\bape\b' },
+            @{ fmt = 'dsf';  demux = '\bdsf\b';              dec = '\bdsd(_lsbf|_msbf)?\b' },
+            @{ fmt = 'dff';  demux = '\bdff\b';              dec = '\bdsd(_lsbf|_msbf)?\b' }
+          )
+          foreach ($r in $req) {
+            if ($demuxers -notmatch $r.demux) {
+              Write-Error "ffmpeg 缺少 $($r.fmt) 解复用器，该输入格式无法处理"
               exit 1
             }
-            Write-Host "decoder OK: $fmt"
+            if ($decoders -notmatch $r.dec) {
+              Write-Error "ffmpeg 缺少 $($r.fmt) 解码器，该输入格式无法处理"
+              exit 1
+            }
+            Write-Host "format OK: $($r.fmt)"
           }
 
           function Split-Cue($audioFile, $label) {

@@ -141,11 +141,18 @@ def discover_audio_files(root: str, recursive: bool = True) -> List[str]:
 def expand_to_inputs(
     paths: List[str],
     recursive: bool = True,
+    audio_hint: Optional[str] = None,
 ) -> Tuple[List[str], List[str]]:
     """把一组拖入的路径展开为 (cue 列表, 待直转音频列表)。
 
     直转列表只包含**没有被任何 CUE 引用**的音频文件——否则同一张专辑的整轨母带
     会既被 CUE 分轨、又被单独转一次，造成重复输出。
+
+    ``audio_hint``（对应 CLI 的 ``--audio``）必须原样传给 :func:`parse_cue`：
+    它会覆盖 CUE 里 ``FILE`` 行的指向，即使用户指定的母带与 CUE 写的文件名
+    不一致（例如 CUE 写 ``Album.ape``、磁盘上是 ``Album-master.ape``），
+    解析结果才是真实被消费的那一个。不传时会把该母带误判为「未被引用」，
+    导致既分轨又直转、输出重复。
     """
     cues = expand_to_cues(paths, recursive=recursive)
 
@@ -153,7 +160,7 @@ def expand_to_inputs(
     referenced: set[str] = set()
     for cue in cues:
         try:
-            sheet = parse_cue(cue)
+            sheet = parse_cue(cue, audio_hint=audio_hint)
         except Exception:  # noqa: BLE001
             continue
         for tr in sheet.tracks:
@@ -339,7 +346,9 @@ def process_all(
 
     返回 (分轨结果, 直转结果列表)。
     """
-    cues, audios = expand_to_inputs(paths, recursive=recursive)
+    cues, audios = expand_to_inputs(
+        paths, recursive=recursive, audio_hint=audio_hint
+    )
 
     # 只有确实存在 CUE 时才进入分轨流程——否则 process_cues 会打印
     # 「未发现任何 .cue 文件，无需处理。」这种噪音提示，

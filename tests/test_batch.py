@@ -203,6 +203,32 @@ def test_expand_to_inputs_excludes_cue_referenced_master(fake_tree):
     assert "master.flac" not in basenames, "被 CUE 引用的母带被重复纳入了直转列表"
 
 
+def test_expand_to_inputs_audio_hint_master_excluded(fake_tree):
+    """--audio 指定的母带也必须被排除在直转列表之外。
+
+    CUE 的 FILE 行写的名字与磁盘实际文件不一致时，用户用 --audio 显式指定
+    真实母带；该母带既被分轨消费，就不应再被单独直转一次。
+    """
+    master = os.path.join(fake_tree, "Album-master.ape")
+    with open(master, "wb") as f:
+        f.write(b"\x00\x00")
+    cue = """FILE "Album.ape" WAVE
+  TRACK 01 AUDIO
+    TITLE "One"
+    INDEX 01 00:00:00
+"""
+    cue_path = os.path.join(fake_tree, "album.cue")
+    with open(cue_path, "w", encoding="utf-8") as f:
+        f.write(cue)
+
+    cues, audios = batch.expand_to_inputs(
+        [fake_tree], recursive=True, audio_hint=master
+    )
+    basenames = [os.path.basename(a) for a in audios]
+    assert "Album-master.ape" not in basenames, \
+        "--audio 指定的母带被重复纳入了直转列表"
+
+
 def test_expand_to_inputs_explicit_audio_file(fake_tree):
     """直接给定的音频文件（未被 CUE 引用）应进入直转列表。"""
     audio = os.path.join(fake_tree, "direct.ape")

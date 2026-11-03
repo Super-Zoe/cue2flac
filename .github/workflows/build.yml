@@ -104,17 +104,17 @@ jobs:
             if (Test-Path $log) { Write-Host "=== cue2flac_cli.log ==="; Get-Content $log }
             # 校验：必须产出两首非空 FLAC
             if (-not (Test-Path "out_$label")) {
-              Write-Error "$label: 输出目录未生成，分轨失败"
+              Write-Error "${label}: 输出目录未生成，分轨失败"
               exit 1
             }
             $files = Get-ChildItem "out_$label" -Recurse -Filter *.flac
             if ($files.Count -ne 2) {
-              Write-Error "$label: 期望生成 2 个 FLAC，实际 $($files.Count) 个"
+              Write-Error "${label}: 期望生成 2 个 FLAC，实际 $($files.Count) 个"
               exit 1
             }
             foreach ($f in $files) {
               if ($f.Length -lt 1000) {
-                Write-Error "$label: FLAC 文件过小：$($f.Name) ($($f.Length) B)"
+                Write-Error "${label}: FLAC 文件过小：$($f.Name) ($($f.Length) B)"
                 exit 1
               }
             }

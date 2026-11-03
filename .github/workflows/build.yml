@@ -83,8 +83,9 @@ jobs:
           #    cue2flac 的分轨链路与格式无关：解码 → 按 INDEX 切段 → FLAC 编码，
           #    唯一与格式相关的是 ffmpeg 的容器解析与解码能力。APE / DSD 只有解码器、
           #    没有编码器，无法在 CI 内合成样本，故以能力可用性作为它们的准入门槛。
-          #    注意：WAV 由 pcm_* 解码器处理（无独立的 "wav" 解码器），
-          #          DSF/DFF 的解码器名为 dsd / dsd_lsbf / dsd_msbf（容器名才是 dsf / dff）。
+          #    注意：WAV 由 pcm_* 解码器处理（无独立的 "wav" 解码器）；
+          #          DSF/DFF 的解码器名为 dsd / dsd_lsbf / dsd_msbf，
+          #          容器名分别是 dsf 与 dsdiff（DSDIFF，即 .dff 文件）。
           $demuxers = ./ffmpeg.exe -hide_banner -demuxers 2>$null | Out-String
           $decoders = ./ffmpeg.exe -hide_banner -decoders 2>$null | Out-String
           $req = @(
@@ -92,7 +93,7 @@ jobs:
             @{ fmt = 'flac'; demux = '\bflac\b';             dec = '\bflac\b' },
             @{ fmt = 'ape';  demux = '\bape\b';              dec = '\bape\b' },
             @{ fmt = 'dsf';  demux = '\bdsf\b';              dec = '\bdsd(_lsbf|_msbf)?\b' },
-            @{ fmt = 'dff';  demux = '\bdff\b';              dec = '\bdsd(_lsbf|_msbf)?\b' }
+            @{ fmt = 'dff';  demux = '\bdsdiff\b';          dec = '\bdsd(_lsbf|_msbf)?\b' }
           )
           foreach ($r in $req) {
             if ($demuxers -notmatch $r.demux) {

@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
 from .ffmpeg_provider import resolve_tool
-from .verify import probe_audio, pcm_md5, decode_ok
+from .verify import probe_audio, pcm_md5, decode_ok, verify_output
 
 # ---------------------------------------------------------------------------
 # 格式常量
@@ -73,12 +73,29 @@ class ConvertResult:
     #: 供用户阅读的性质说明（如 DSD 的「高质量转换」提示）。
     note: str = ""
     errors: List[str] = field(default_factory=list)
+    #: 校验警告（如「参数被改动」但不影响播放）。
+    warnings: List[str] = field(default_factory=list)
     src_params: dict = field(default_factory=dict)
     out_params: dict = field(default_factory=dict)
+    #: 统一的校验结论（verify.TrackVerifyResult）。
+    verify: Optional[object] = None
 
     @property
     def name(self) -> str:
         return os.path.basename(self.src)
+
+    @property
+    def status(self) -> str:
+        """人类可读的判定结论：无损 / 有损转换 / 参数被改动 / 校验未通过。
+
+        未做校验（``--no-verify``）时**不宣称「无损」**——没有比对就没有
+        结论依据，此时只报「已转换（未校验）」。
+        """
+        if self.verify is not None:
+            return getattr(self.verify, "status", "校验未通过")
+        if not self.ok:
+            return "失败"
+        return "已转换（未校验）"
 
 def is_supported_audio(path: str) -> bool:
     """判断路径是否是本模块支持的音频文件（按扩展名）。"""
@@ -314,34 +331,25 @@ def convert_file(
     _copy_tags(src, out_path, ff)
 
     res.out_path = out_path
-    res.out_params = probe_audio(out_path, ffprobe) or {}
-    res.src_params = probe_audio(src, ffprobe) or {}
 
     if verify:
-        ok, err = decode_ok(out_path, ff)
-        if not ok:
-            res.errors.append("输出文件无法解码（可能已损坏）：" + str(err)[:300])
-            return res
-
-        if dsd:
-            # DSD→PCM 不可逆，无法做逐样本 MD5 比对；改为校验参数与可播放性
-            res.lossless = False
-            if res.src_params.get("channels") and res.out_params.get("channels") \
-                    and res.src_params["channels"] != res.out_params["channels"]:
-                res.errors.append(
-                    f"声道数 {res.out_params['channels']}≠源 {res.src_params['channels']}"
-                )
-        else:
-            src_md5 = pcm_md5(src, ff, 0.0, None)
-            out_md5 = pcm_md5(out_path, ff, 0.0, None)
-            if src_md5 and out_md5:
-                if src_md5 == out_md5:
-                    res.lossless = True
-                else:
-                    res.errors.append("PCM 与源文件不一致（可能存在数据损坏或位深下降）")
-            else:
-                res.errors.append("无法对源 / 输出做 PCM 比对（跳过无损校验）")
+        # 复用与分轨链路完全相同的校验逻辑（verify.verify_output）：
+        # 可播放性 + 采样率 / 位深 / 声道数 + 帧数 / 时长 + PCM 逐字节 MD5。
+        # 两条链路用同一套判据，避免「分轨会查、直转不查」的不一致。
+        vres = verify_output(
+            src, out_path, ff, ffprobe,
+            src_start=0.0, src_end=None, track_no=1,
+            dsd_note=res.note if dsd else "",
+        )
+        res.verify = vres
+        res.src_params = vres.src_params
+        res.out_params = vres.out_params
+        res.lossless = vres.lossless
+        res.errors.extend(vres.errors)
+        res.warnings.extend(vres.warnings)
     else:
+        res.out_params = probe_audio(out_path, ffprobe) or {}
+        res.src_params = probe_audio(src, ffprobe) or {}
         res.lossless = not dsd
 
     res.ok = not res.errors
@@ -369,34 +377,76 @@ def convert_files(
         results.append(r)
         if on_progress:
             if r.ok:
-                tag = "无损" if r.lossless else "已转换"
-                on_progress(f"[完成] {r.name} → {r.out_path}（{tag}）\n")
-                if r.note:
-                    on_progress(f"        说明：{r.note}\n")
+                on_progress(f"[完成] {r.name} → {r.out_path}（{r.status}）\n")
+                _print_verify_detail(r, on_progress)
             else:
                 on_progress(f"[失败] {r.name}：{'; '.join(r.errors)}\n")
+                _print_verify_detail(r, on_progress)
     return results
 
 
+def _print_verify_detail(r: "ConvertResult", on_progress) -> None:
+    """输出单个文件的逐项校验结果（参数对照 + 判定结论）。"""
+    if on_progress is None:
+        return
+    v = r.verify
+    if v is None:
+        return
+    on_progress(
+        "        校验：采样率 {sr} / 位深 {sb} / 声道 {sc} / 帧数 {sf} / 时长 {sd}\n".format(
+            sr=f"{v.src_params.get('sample_rate', '?')}→"
+               f"{v.out_params.get('sample_rate', '?')}",
+            sb=f"{v.src_params.get('bits', '?')}→{v.out_params.get('bits', '?')}",
+            sc=f"{v.src_params.get('channels', '?')}→"
+               f"{v.out_params.get('channels', '?')}",
+            sf=f"{v.src_frames}→{v.out_frames}",
+            sd=f"{v.src_duration:.3f}s→{v.out_duration:.3f}s",
+        )
+    )
+    if v.lossy_reason:
+        on_progress(f"        提示：{v.lossy_reason}\n")
+    for w in v.warnings:
+        on_progress(f"        提示：{w}\n")
+
+
 def format_convert_summary(results: List[ConvertResult]) -> str:
-    """把转换结果渲染为可读汇总。"""
+    """把转换结果渲染为可读汇总，含逐项校验结论。"""
     ok = [r for r in results if r.ok]
     failed = [r for r in results if not r.ok]
+    verified = any(r.verify is not None for r in results)
     lines: List[str] = []
-    lines.append("─" * 48)
-    lines.append("直接转换汇总")
+    lines.append("─" * 52)
+    lines.append("直接转换汇总（含无损校验）" if verified else "直接转换汇总")
     lines.append(f"  处理文件数：{len(results)}")
     lines.append(f"  成功      ：{len(ok)}")
     lines.append(f"  失败      ：{len(failed)}")
-    lines.append("─" * 48)
-    for r in ok:
-        tag = "无损" if r.lossless else "转换"
-        lines.append(f"  ✓ {r.name} → {os.path.basename(r.out_path or '')}（{tag}）")
+    lines.append("─" * 52)
+    for r in results:
+        mark = "✓" if r.ok else "✗"
+        lines.append(
+            f"  {mark} {r.name} → {os.path.basename(r.out_path or '')}（{r.status}）"
+        )
+        v = r.verify
+        if v is not None:
+            lines.append(
+                "      采样率 {sr} / 位深 {sb} / 声道 {sc} / 帧数 {sf} / 时长 {sd}".format(
+                    sr=f"{v.src_params.get('sample_rate', '?')}→"
+                       f"{v.out_params.get('sample_rate', '?')}",
+                    sb=f"{v.src_params.get('bits', '?')}→"
+                       f"{v.out_params.get('bits', '?')}",
+                    sc=f"{v.src_params.get('channels', '?')}→"
+                       f"{v.out_params.get('channels', '?')}",
+                    sf=f"{v.src_frames}→{v.out_frames}",
+                    sd=f"{v.src_duration:.3f}s→{v.out_duration:.3f}s",
+                )
+            )
         if r.note:
-            lines.append(f"      {r.note}")
-    for r in failed:
-        lines.append(f"  ✗ {r.name}")
+            lines.append(f"      说明：{r.note}")
+        if v is not None and v.lossy_reason:
+            lines.append(f"      提示：{v.lossy_reason}")
+        for w in r.warnings:
+            lines.append(f"      提示：{w}")
         for e in r.errors:
             lines.append(f"      {e}")
-    lines.append("─" * 48)
+    lines.append("─" * 52)
     return "\n".join(lines)

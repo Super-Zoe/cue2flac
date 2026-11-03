@@ -210,10 +210,19 @@ jobs:
 
           function Convert-And-Check($src, $label, $expectRate, $expectBits) {
             $out = "conv_$label"
-            $runOut = ./dist/cue2flac.exe $src -o $out --no-cover --verify 2>&1 | Out-String
+            $runOut = ./dist/cue2flac.exe $src -o $out --no-cover 2>&1 | Out-String
             Write-Host $runOut
             if ($runOut -notmatch '直接转换汇总') {
               Write-Error "${label}: 未进入直接转换流程"
+              exit 1
+            }
+            # 校验默认开启：输出必须给出逐项校验结果并判定为「无损」
+            if ($runOut -notmatch '校验：采样率') {
+              Write-Error "${label}: 未输出逐项校验结果"
+              exit 1
+            }
+            if ($runOut -notmatch '（无损）') {
+              Write-Error "${label}: 校验结论不是「无损」"
               exit 1
             }
             $flac = Get-ChildItem $out -Filter *.flac -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -258,6 +267,48 @@ jobs:
           Convert-And-Check "conv.flac" "flac" 44100 16
 
           Write-Host "Direct-convert smoke OK"
+
+      - name: "Smoke test (verify detects parameter changes)"
+        shell: pwsh
+        run: |
+          # 校验能力冒烟：构造一个「参数被改动」的输出，确认程序能检出并提示。
+          # 做法：把 44100 源重采样到 22050 作为「坏输出」，
+          # 让校验逻辑比对源与它，断言必须报出采样率不一致。
+          New-Item -ItemType Directory -Force verifycase | Out-Null
+          ./ffmpeg.exe -f lavfi -i anullsrc=r=44100:cl=stereo -t 3 -y verifycase\src.wav 2>$null
+          ./ffmpeg.exe -y -i verifycase\src.wav -ar 22050 -c:a flac verifycase\bad.flac 2>$null
+          # 用 Python 直接调用内置校验模块，断言能检出参数改动。
+          # 注意：不能用 @"..."@ 这种嵌套 here-string（结束标记必须顶格，
+          # 在缩进块里必然报错），改用数组 -join 拼接。
+          $pyLines = @(
+            "import sys",
+            "sys.path.insert(0, '.')",
+            "from cue2flac import verify as V",
+            "from cue2flac.ffmpeg_provider import resolve_tool",
+            "ff = resolve_tool('ffmpeg'); fp = resolve_tool('ffprobe')",
+            "r = V.verify_whole_file('verifycase/src.wav', 'verifycase/bad.flac', ff, fp)",
+            "print('status =', r.status)",
+            "print('params_match =', r.params_match)",
+            "for e in r.errors: print('ERR:', e)",
+            "assert not r.params_match, 'parameter change not detected'",
+            "assert r.status == u'\u53c2\u6570\u88ab\u6539\u52a8', 'wrong status: %s' % r.status",
+            "assert any('sampling' in e or u'\u91c7\u6837\u7387' in e for e in r.errors), 'no rate diff reported'",
+            "import subprocess",
+            "subprocess.run([ff, '-y', '-i', 'verifycase/src.wav', '-c:a', 'flac', 'verifycase/good.flac'], check=True, capture_output=True)",
+            "g = V.verify_whole_file('verifycase/src.wav', 'verifycase/good.flac', ff, fp)",
+            "print('good status =', g.status)",
+            "assert g.ok, 'good output failed: %s' % g.errors",
+            "assert g.src_frames == g.out_frames, 'frame count mismatch'",
+            "assert abs(g.src_duration - g.out_duration) < 1e-3, 'duration mismatch'",
+            "print('VERIFY-DETECT OK')"
+          )
+          $pyLines -join "`n" | Set-Content -Encoding UTF8 verifycase\check.py
+          $out = python verifycase\check.py 2>&1 | Out-String
+          Write-Host $out
+          if ($out -notmatch 'VERIFY-DETECT OK') {
+            Write-Error "校验能力冒烟未通过"
+            exit 1
+          }
 
       - name: Batch smoke test (scan directory, skip broken)
         shell: pwsh

@@ -81,7 +81,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("-a", "--audio", help="指定整轨音频文件（覆盖 CUE 中 FILE 指向）")
     p.add_argument("--no-cover", action="store_true", help="不复制封面")
-    p.add_argument("--verify", action="store_true", help="分轨后校验每条音轨的 PCM 无损")
+    p.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="跳过转换后的无损校验（默认开启：校验可播放性 / 采样率 / 位深 / "
+             "声道数 / 帧数 / 时长 / PCM 逐字节一致性，并输出判定结果）",
+    )
     p.add_argument(
         "--dir",
         metavar="DIR",
@@ -149,7 +154,7 @@ def _run_single_cue(cue: str, args, log_path: Optional[str]) -> int:
             out_dir,
             audio_hint=args.audio,
             copy_cover=not args.no_cover,
-            verify=args.verify,
+            verify=not args.no_verify,
             on_progress=lambda m: print(m, end=""),
         )
         msg = f"分轨完成，已生成 {len(results)} 个文件：\n{out_dir}"
@@ -178,7 +183,7 @@ def _run_mixed(inputs: List[str], args, log_path: Optional[str]) -> int:
             out=args.out,
             audio_hint=args.audio,
             copy_cover=not args.no_cover,
-            verify=args.verify,
+            verify=not args.no_verify,
             on_progress=lambda m: print(m, end=""),
         )
     except (FileNotFoundError, ValueError) as e:
@@ -225,7 +230,7 @@ def _run_batch(root: str, args, log_path: Optional[str]) -> int:
             out=args.out,
             audio_hint=args.audio,
             copy_cover=not args.no_cover,
-            verify=args.verify,
+            verify=not args.no_verify,
             on_progress=lambda m: print(m, end=""),
         )
     except (FileNotFoundError, ValueError) as e:

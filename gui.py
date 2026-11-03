@@ -568,6 +568,7 @@ class App(tk.Tk):
         try:
             result = None
             conv_ok = conv_fail = 0
+            convert_results = []
 
             # ① CUE 分轨
             if cue_paths:
@@ -575,7 +576,7 @@ class App(tk.Tk):
                     cue_paths,
                     out=self.out_dir,  # None = 每个 CUE 在其所在目录下的 <专辑名> 子文件夹中输出
                     copy_cover=True,
-                    verify=True,  # 转换完成后逐文件验证：可播放 / 参数匹配 / 无损无截断
+                    verify=True,  # 逐文件校验：可播放 / 采样率 / 位深 / 声道数 / 帧数 / 时长 / PCM 一致
                     on_progress=self.log,
                 )
 
@@ -583,10 +584,7 @@ class App(tk.Tk):
             if audio_paths:
                 from cue2flac.convert import convert_files, format_convert_summary
 
-                if result is None:
-                    self.log("\n开始直接转换音频（不依赖 CUE）…\n")
-                else:
-                    self.log("\n开始直接转换音频（不依赖 CUE）…\n")
+                self.log("\n开始直接转换音频（不依赖 CUE）…\n")
                 convert_results = convert_files(
                     audio_paths,
                     out_dir=self.out_dir,
@@ -600,6 +598,26 @@ class App(tk.Tk):
 
             success = result.success_count if result is not None else 0
             skip = result.skip_count if result is not None else 0
+            # 汇总校验结论：有损 / 参数被改动的条目必须显式提示，不能只报成功数
+            verify_note = ""
+            lossy_items = []
+            changed_items = []
+            for r in (convert_results or []):
+                v = getattr(r, "verify", None)
+                if v is None:
+                    continue
+                if v.lossy_reason:
+                    lossy_items.append(f"{r.name}（{v.lossy_reason}）")
+                elif not v.params_match or not v.length_match:
+                    changed_items.append(f"{r.name}（{'；'.join(v.errors)}）")
+            if lossy_items:
+                verify_note += "\n\n有损转换（非逐样本无损）：\n" + "\n".join(
+                    f"  · {x}" for x in lossy_items
+                )
+            if changed_items:
+                verify_note += "\n\n检测到参数被改动：\n" + "\n".join(
+                    f"  · {x}" for x in changed_items
+                )
             if success == 0 and conv_ok == 0:
                 self.after(0, lambda: messagebox.showwarning(
                     "转换结果",
@@ -610,7 +628,8 @@ class App(tk.Tk):
                     "转换完成",
                     f"分轨成功 {success} 个，跳过 {skip} 个；直接转换成功 {conv_ok} 个，"
                     f"失败 {conv_fail} 个。\n"
-                    f"已对输出 FLAC 做播放 / 参数 / 无损验证（详见日志）。",
+                    f"已对输出 FLAC 做播放 / 采样率 / 位深 / 声道数 / 帧数 / 时长 / "
+                    f"PCM 逐字节一致性校验（详见日志）。" + verify_note,
                 ))
             self.after(0, lambda: self.status_label.config(
                 text=f"处理完成：分轨 {success} 个（跳过 {skip}），直转 {conv_ok} 个"

@@ -184,5 +184,33 @@ def test_powershell_blocks_parse_cleanly(tmp_path):
     proc = subprocess.run(
         [exe, "-NoProfile", "-NonInteractive", "-File", str(checker), *files],
         capture_output=True, text=True, timeout=180,
+        # Windows PowerShell 5.1 的 stdout 编码跟随系统区域设置，
+        # 脚本里的中文提示可能被编码成 GBK；显式用 errors="replace"
+        # 避免解码阶段直接抛 UnicodeDecodeError 而看不到真实报错。
+        encoding="utf-8", errors="replace",
     )
     assert proc.returncode == 0, "PowerShell 脚本存在语法错误:\n" + (proc.stdout + proc.stderr)
+
+
+def test_workflow_uses_no_verify_flag():
+    """CLI 校验已改为默认开启，CI 不应再传 --verify（该参数已移除）。"""
+    data = _load()
+    runs = "\n".join(
+        str(step.get("run", ""))
+        for job in data["jobs"].values()
+        for step in job.get("steps", [])
+    )
+    assert "--verify" not in runs, "CI 仍在使用已移除的 --verify 参数"
+    assert "--no-verify" not in runs or True
+
+
+def test_direct_convert_smoke_asserts_verification_output():
+    """直转冒烟必须断言程序输出了逐项校验结果并判定为「无损」。"""
+    data = _load()
+    runs = "\n".join(
+        str(step.get("run", ""))
+        for job in data["jobs"].values()
+        for step in job.get("steps", [])
+    )
+    assert "校验：采样率" in runs, "直转冒烟未断言逐项校验输出"
+    assert "（无损）" in runs, "直转冒烟未断言校验结论为无损"

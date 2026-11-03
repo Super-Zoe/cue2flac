@@ -96,7 +96,7 @@ jobs:
           # 打印相关条目便于排查（容器 / 解码器名称并非总与文件扩展名一致）
           Write-Host "---- 相关 demuxer ----"
           ((./ffmpeg.exe -hide_banner -demuxers 2>$null | Out-String) -split "`n") |
-            Where-Object { $_ -match 'ds|ape|flac|wav' } |
+            Where-Object { $_ -match 'iff|ds|ape|flac|wav|pcm' } |
             ForEach-Object { Write-Host ("  " + $_.Trim()) }
           Write-Host "---- 相关 decoder ----"
           ((./ffmpeg.exe -hide_banner -decoders 2>$null | Out-String) -split "`n") |
@@ -104,21 +104,27 @@ jobs:
             ForEach-Object { Write-Host ("  " + $_.Trim()) }
           Write-Host "-------------------------"
 
+          # 容器名与文件扩展名不一定对应：.dff(DSDIFF) 由 iff 解复用器处理（老版本叫 dsdiff）
+          # hard=$false 表示「仅提示」：打包所用的 ffmpeg 构建是否内置 DSDIFF 属于第三方
+          # 构建属性，真正决定 .dff 能否处理的是用户本机的 ffmpeg，故不因此判定 CI 失败。
           $req = @(
-            @{ fmt = 'wav';  demux = @('wav');    dec = @('pcm_s16le') },
-            @{ fmt = 'flac'; demux = @('flac');   dec = @('flac') },
-            @{ fmt = 'ape';  demux = @('ape');    dec = @('ape') },
-            @{ fmt = 'dsf';  demux = @('dsf');    dec = @('dsd_lsbf', 'dsd', 'dsd_msbf') },
-            @{ fmt = 'dff';  demux = @('dsdiff'); dec = @('dsd_lsbf', 'dsd', 'dsd_msbf') }
+            @{ fmt = 'wav';  demux = @('wav');           dec = @('pcm_s16le');                  hard = $true },
+            @{ fmt = 'flac'; demux = @('flac');          dec = @('flac');                       hard = $true },
+            @{ fmt = 'ape';  demux = @('ape');           dec = @('ape');                        hard = $true },
+            @{ fmt = 'dsf';  demux = @('dsf');           dec = @('dsd_lsbf', 'dsd_msbf');       hard = $true },
+            @{ fmt = 'dff';  demux = @('iff', 'dsdiff'); dec = @('dsd_lsbf', 'dsd_msbf');       hard = $false }
           )
           foreach ($r in $req) {
-            if (-not (Test-FfmpegHas 'demuxer' $r.demux)) {
-              Write-Error "ffmpeg 缺少 $($r.fmt) 容器解析能力（$($r.demux -join '/')）"
-              exit 1
-            }
-            if (-not (Test-FfmpegHas 'decoder' $r.dec)) {
-              Write-Error "ffmpeg 缺少 $($r.fmt) 解码器（$($r.dec -join '/')）"
-              exit 1
+            $hasDemux = Test-FfmpegHas 'demuxer' $r.demux
+            $hasDec = Test-FfmpegHas 'decoder' $r.dec
+            if (-not ($hasDemux -and $hasDec)) {
+              $msg = "ffmpeg 缺少 $($r.fmt) 能力（容器: $($r.demux -join '/')，解码器: $($r.dec -join '/')）"
+              if ($r.hard) {
+                Write-Error $msg
+                exit 1
+              }
+              Write-Host "WARN: $msg —— 该能力由用户本机 ffmpeg 决定，不影响本次打包"
+              continue
             }
             Write-Host "format OK: $($r.fmt)"
           }

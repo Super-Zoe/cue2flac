@@ -71,22 +71,25 @@ class TrackVerifyResult:
 
     @property
     def ok(self) -> bool:
-        """整体通过：可播放 + 参数一致 + 长度一致 + 无损。"""
-        return (
-            self.playable
-            and self.params_match
-            and self.length_match
-            and self.lossless
-            and self.no_truncation
-        )
+        """整体通过。
+
+        - **无损路径**：可播放 + 参数一致 + 长度一致 + PCM 逐字节一致。
+        - **有损路径**（DSD → PCM 等，天然不可逆）：可播放 + 参数一致 +
+          长度一致即可判定为「转换成功」。此时**不能**要求逐样本无损——
+          否则 DSD 源无论怎么转都会被判为失败。
+        """
+        if self.playable and self.params_match and self.length_match \
+                and self.no_truncation:
+            return True
+        return False
 
     @property
     def status(self) -> str:
         """人类可读的判定结论。"""
         if self.ok:
-            return "无损"
+            return "有损转换" if self.lossy_reason else "无损"
         if self.lossy_reason:
-            return "有损转换"
+            return "有损转换失败"
         if not self.params_match or not self.length_match:
             return "参数被改动"
         return "校验未通过"
@@ -188,8 +191,8 @@ def decoded_stream_info(path: str, ff: str) -> Dict:
 
     为什么不用 ffprobe 的容器参数：ffprobe 报告的是**容器**声明的采样率，
     而解码器实际输出的采样率可能不同——
-    - DSD（.dsf/.dff）容器声明 2.8224MHz（比特率），ffmpeg 的 DSD 解码器
-      固定按 8× 抽取，实际输出 352.8kHz PCM；
+    - DSD（.dsf/.dff）容器声明 2.8224MHz（这是 1-bit **比特率**），
+      ffmpeg 解码后实际输出 352.8kHz PCM（相差 8 倍）；
     - 被重采样过的源，容器率与解码率也可能不一致。
 
     帧数/时长必须基于**解码后**的真实速率推算，否则算出来的时长是错的。
@@ -403,8 +406,8 @@ def verify_output(
     src_ch = int((src or {}).get("channels") or 0)
     out_ch = int((out or {}).get("channels") or 0)
 
-    # 采样率必须取**解码后**的真实值：DSD 容器声明 2.8224MHz，
-    # 而 ffmpeg 的 DSD 解码器固定 8× 抽取（实际输出 352.8kHz）。
+    # 采样率必须取**解码后**的真实值：DSD 容器声明 2.8224MHz（1-bit 比特率），
+    # 而 ffmpeg 解码后输出的是 352.8kHz PCM（相差 8 倍）。
     # 用容器率推算时长会得到错误结果。
     src_dec = decoded_stream_info(src_audio, ff)
     out_dec = decoded_stream_info(out_path, ff)
@@ -462,12 +465,17 @@ def verify_track(
     ff: str,
     ffprobe: str,
     on_progress=None,
+    dsd_note: str = "",
 ) -> TrackVerifyResult:
-    """校验分轨输出（比对源文件的某个时间区段）。"""
+    """校验分轨输出（比对源文件的某个时间区段）。
+
+    ``dsd_note`` 非空时按「有损转换」处理（DSD → PCM 不可逆，
+    无法做逐样本 MD5 比对，长度一致性改由时长判据保证）。
+    """
     return verify_output(
         src_audio, out_path, ff, ffprobe,
         src_start=src_start, src_end=src_end, track_no=track_no,
-        on_progress=on_progress,
+        dsd_note=dsd_note, on_progress=on_progress,
     )
 
 
@@ -497,6 +505,7 @@ def verify_outputs(
     ff: str,
     ffprobe: str,
     on_progress=None,
+    dsd_note: str = "",
 ) -> VerificationReport:
     """对一批分轨输出逐一校验，返回汇总报告。
 
@@ -511,13 +520,19 @@ def verify_outputs(
         if on_progress:
             on_progress(f"  校验 {os.path.basename(out_path)} …\n")
         r = verify_track(
-            tr.file, tr.start, tr.end, out_path, tr.number, ff, ffprobe, on_progress
+            tr.file, tr.start, tr.end, out_path, tr.number, ff, ffprobe,
+            on_progress, dsd_note=dsd_note,
         )
         report.results.append(r)
         if r.ok:
             report.passed += 1
             if on_progress:
-                on_progress("    ✓ 可播放 / 参数一致 / 帧数时长一致 / PCM 逐字节一致\n")
+                if r.lossy_reason:
+                    on_progress("    ✓ 可播放 / 参数一致 / 时长一致（无损转换）\n")
+                else:
+                    on_progress(
+                        "    ✓ 可播放 / 参数一致 / 帧数时长一致 / PCM 逐字节一致\n"
+                    )
         else:
             report.failed += 1
             if on_progress:

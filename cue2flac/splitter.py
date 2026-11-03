@@ -13,19 +13,14 @@ import subprocess
 from typing import List, Optional
 
 from .cue_parser import CueSheet, Track
+from .dsd import DSD_EXTS as _DSD_EXTS, DSD_CODECS as _DSD_CODECS
+from .dsd import dsd_plan
 from .ffmpeg_provider import resolve_tool
 from .verify import verify_outputs, format_verification_report
 
 
 class SplitterError(RuntimeError):
     """分轨过程中的可预期错误。"""
-
-
-# DSD（1-bit 德尔塔-西格玛）源码：转成 PCM/FLAC 属于高质量转换，而非逐样本无损
-_DSD_EXTS = (".dsf", ".dff")
-_DSD_CODECS = (
-    "dsd", "dsd_lsbf", "dsd_msbf", "dsd_lsbf_planar", "dsd_msbf_planar",
-)
 
 
 def _is_dsd(audio_path: str, ffprobe: str) -> bool:
@@ -165,15 +160,31 @@ def split(
     total = sheet.total_tracks
     results: List[str] = []
 
-    # DSD 源码检测：用于提示 + 跳过 PCM 位深参数
+    # DSD 源码检测：用于提示 + 走「低通 + 降采样」转换路径
     is_dsd = bool(sheet.tracks) and _is_dsd(sheet.tracks[0].file, ffprobe)
+    dsd_args: List[str] = []
+    dsd_note_text = ""
     if is_dsd:
-        # DSD 为 1-bit 编码，其“位深”不能当作 PCM 位深；交给 ffmpeg 默认输出 32-bit PCM
+        # DSD 为 1-bit 编码，其“位深”不能当作 PCM 位深。
+        #
+        # 关键：DSD 源的解码采样率高达 352.8kHz（DSD64），**FLAC 编码器
+        # 不接受该采样率**（实测报 "2822400 Hz not supported"）。
+        # 必须像直转链路一样做「低通 + 抽取降采样」，两条链路行为保持一致。
         sample_fmt = ""
+        target_sr, cutoff, filt, dsd_note_text = dsd_plan(
+            sheet.tracks[0].file, ffprobe
+        )
+        dsd_args = [
+            "-af", filt,
+            "-ar", str(target_sr),
+            "-c:a", "flac",
+            "-sample_fmt", "s32",
+        ]
         if on_progress:
             on_progress(
                 "注意：检测到 DSD 源码（.dsf/.dff）。DSD 是 1-bit 编码，转 FLAC（PCM）"
-                "属于高质量转换，并非逐样本无损；输出采用 ffmpeg 默认的 32-bit PCM。\n"
+                f"属于高质量转换，并非逐样本无损；已低通滤波（截止 {cutoff} Hz）"
+                f"并降采样至 {target_sr} Hz / 32-bit FLAC。\n"
             )
 
     if on_progress:
@@ -210,9 +221,13 @@ def split(
         if copy_cover:
             cmd += ["-map", "0:v:0?"]
             cmd += ["-c:v", "copy"]
-        cmd += ["-c:a", "flac"]
-        if sample_fmt:
-            cmd += ["-sample_fmt", sample_fmt]
+        if is_dsd:
+            # DSD：低通 + 抽取降采样（与直转链路完全一致）
+            cmd += dsd_args
+        else:
+            cmd += ["-c:a", "flac"]
+            if sample_fmt:
+                cmd += ["-sample_fmt", sample_fmt]
 
         if tr.title:
             cmd += ["-metadata", f"title={tr.title}"]
@@ -238,7 +253,9 @@ def split(
             on_progress(
                 "开始输出验证：检查可播放性、音频参数匹配与无损一致性…\n"
             )
-        report = verify_outputs(sheet, results, ff, ffprobe, on_progress)
+        report = verify_outputs(
+            sheet, results, ff, ffprobe, on_progress, dsd_note=dsd_note_text
+        )
         if on_progress:
             on_progress(format_verification_report(report) + "\n")
         if not report.all_ok:

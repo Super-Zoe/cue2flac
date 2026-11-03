@@ -9,6 +9,7 @@
 
 - [特性](#特性)
 - [工作原理（无损链路）](#工作原理无损链路)
+  - [输入格式支持矩阵（分轨链路）](#输入格式支持矩阵分轨链路)
 - [下载与安装](#下载与安装)
 - [使用](#使用)
   - [图形界面（单一拖放区）](#图形界面单一拖放区)
@@ -30,7 +31,7 @@
 - **无损分轨**：整轨音频解码为 PCM → 按 CUE 的 `INDEX 01` / 下一条 `INDEX 01` 切出区段 → FLAC 编码器重新封装。只要不改变采样率与位深，输出 PCM 与源对应区段**逐样本一致**（校验默认开启，逐项比对采样率 / 位深 / 声道数 / 帧数 / 时长 / PCM）。
 - **多格式输入**：凡 ffmpeg 支持的整轨音频均可，包括但不限于 FLAC、WAV、APE、**DSD（.dsf / .dff）**、WavPack（.wv）、TTA、TAK、M4A。
   - **PCM 源码（FLAC / WAV / APE / WavPack / TTA / TAK / M4A）**：解码 → 切段 → FLAC 重新封装，输出 PCM 与源区段**逐样本一致**，是真正的无损分轨（校验默认开启）。
-  - **DSD 源码（.dsf / .dff）**：DSD 是 1-bit 德尔塔-西格玛编码，无法逐样本映射为 PCM/FLAC，因此 DSD → FLAC 属于**高质量转换而非逐样本无损**；程序会采用 ffmpeg 默认的 32-bit PCM 输出，并在日志中明确提示。输出文件可正常播放，但与原始 DSD 比特流不存在「逐字节一致」关系。
+  - **DSD 源码（.dsf / .dff）**：DSD 是 1-bit 德尔塔-西格玛编码，无法逐样本映射为 PCM/FLAC，因此 DSD → FLAC 属于**高质量转换而非逐样本无损**；程序按业界标准做法做「低通滤波 + 抽取降采样」（DSD64 → 88.2kHz / 24-bit），并在日志与结果汇总中明确标注为「有损转换」。输出文件可正常播放，但与原始 DSD 比特流不存在「逐字节一致」关系。
 - **CUE 兼容**：自动识别 `INDEX 00/01`、`PERFORMER` / `TITLE`（专辑级与曲目级）、`REM GENRE/DATE/COMMENT`、`FILE` 指向；支持 GBK / UTF-8(-SIG) / Shift-JIS / CP1252 / Latin-1 多种编码自动探测。
 - **音源自动匹配**：CUE 里 `FILE` 写的文件名与磁盘实际文件不一致时（如 CUE 写 `Album-CD1.ape`、实际文件叫 `陈奕迅-Album-CD1.ape`），会按名称相似度自动匹配到正确文件并在日志中提示。
 - **无需 CUE 的直转**：**不依赖 CUE**，直接把单个或多个整轨无损音频（`.flac` `.wav` `.ape` `.dsf` `.dff` `.wv` `.tta` `.tak` `.alac` `.aiff`）转换为 FLAC，一个源文件对应一个 FLAC。
@@ -50,7 +51,24 @@
 
 FLAC 是无损压缩，对 PCM 做有损重编码在技术上不可能；因此“解码整轨 → 用 FLAC 编码重新封装”得到的 PCM 与直接从源文件取对应区段完全一致。校验会对“源对应区段”与“输出文件”各自解码为 `s32le` 裸 PCM 求 MD5，确保分轨结果逐字节无损、无截断，并逐项比对采样率 / 位深 / 声道数 / 帧数 / 时长。
 
-> **DSD 例外**：当源为 `.dsf` / `.dff`（1-bit DSD）时，上述链路是「DSD → 32-bit PCM → FLAC」。DSD→PCM 这一步本身不可逆、非逐样本无损，故 DSD 源的校验仅能证明「切分过程未额外丢损」，不能证明与原始 DSD 比特流逐字节一致；程序会将其明确标注为「有损转换」。这是格式本质差异，并非程序缺陷。
+> **DSD 例外**：当源为 `.dsf` / `.dff`（1-bit DSD）时，上述链路是「DSD → 低通滤波 → 抽取降采样 → 32-bit PCM → FLAC」。DSD→PCM 这一步本身不可逆、非逐样本无损，故 DSD 源的校验仅能证明「切分过程未额外丢损」，不能证明与原始 DSD 比特流逐字节一致；程序会将其明确标注为「有损转换」。这是格式本质差异，并非程序缺陷。
+
+### 输入格式支持矩阵（分轨链路）
+
+下表列出各无损格式经 CUE 分轨后的**实际行为**，均已用真实文件实测验证：
+
+| 格式 | 扩展名 | 分轨是否可用 | 输出参数 | 无损性质 |
+|---|---|---|---|---|
+| WAV | `.wav` | ✅ | 与源一致（采样率 / 位深 / 声道数） | **逐样本无损**（PCM MD5 一致） |
+| FLAC | `.flac` | ✅ | 与源一致 | **逐样本无损** |
+| APE | `.ape` | ✅ | 与源一致 | **逐样本无损** |
+| DSD | `.dsf` | ✅ | 88200 Hz / 24-bit / 立体声（DSD64） | **高质量转换**（非逐样本无损） |
+| DSD | `.dff` | ✅ | 88200 Hz / 24-bit / 立体声（DSD64） | **高质量转换**（非逐样本无损） |
+
+- **WAV / FLAC / APE**：解码后按 `INDEX 01` 切段再重新封装，采样率、位深、声道数、帧数、时长全部与源对应区段一致，PCM 逐字节相同。
+- **24bit WAV**：用 `s32` 承载 24 位有效数据，FLAC 记录 `bits_per_raw_sample=24`，**不会被静默降为 16bit**。
+- **DSD**：解码率为 352.8kHz（DSD64），远超 FLAC 编码器上限，程序自动做「低通 24kHz + soxr 降采样至 88.2kHz」，输出 32-bit FLAC；每首**时长精确**（切割定位准确），但因 DSD→PCM 不可逆，明确标注为「有损转换」。
+- 其它 ffmpeg 能解码的格式（WavPack / TTA / TAK / ALAC / AIFF / M4A 等）同样可用，行为与 PCM 系一致。
 
 ---
 
@@ -126,7 +144,9 @@ python main.py --dir "D:/Music/整轨"
 | WavPack / TTA / TAK / ALAC / AIFF | `.wv` `.tta` `.tak` `.alac` `.aiff` | **逐样本无损** | 同上 |
 | DSD | `.dsf` `.dff` | **高质量转换**（非逐样本无损） | 见下方说明 |
 
-**关于 DSD 的边界**（重要）：DSD 是 1-bit 德尔塔-西格玛编码，其比特流**无法**无损映射为 PCM 样本。因此 `.dsf` / `.dff` 转 FLAC 属于**高质量转换，而非逐样本无损**。程序按业界标准做法处理：先低通滤波截止掉 DSD 的超声频量化噪声（DSD64 截止 24kHz、DSD128 截止 40kHz），再抽取降采样到 PCM 采样率（DSD64 → 88.2kHz、DSD128 → 176.4kHz），输出 32-bit FLAC。这一步在日志与结果汇总中会**明确标注**，不会被混称为「无损」。
+**关于 DSD 的边界**（重要）：DSD 是 1-bit 德尔塔-西格玛编码，其比特流**无法**无损映射为 PCM 样本。因此 `.dsf` / `.dff` 转 FLAC 属于**高质量转换，而非逐样本无损**。程序按业界标准做法处理：先低通滤波截止掉 DSD 的超声频量化噪声（DSD64 截止 24kHz、DSD128 截止 40kHz），再抽取降采样（DSD64 → 88.2kHz、DSD128 → 176.4kHz），输出 32-bit FLAC。这一步在日志与结果汇总中会**明确标注**，不会被混称为「无损」。
+
+> **DSD 采样率的事实**：DSD64 容器声明 2.8224MHz，但那是 **1-bit 比特率**；ffmpeg 解码后输出的是 **352.8kHz PCM**（两者相差 8 倍）。352.8kHz 远超 FLAC 编码器的采样率上限，**必须**先降采样才能编码——否则 ffmpeg 会直接报 `352800 Hz not supported` 而转换失败。程序对分轨与直转两条链路使用**完全相同**的 DSD 处理策略。
 
 **位深保持**：FLAC 编码器只接受 `s16` / `s32` 两种采样格式。程序会自动探测源位深并选择合适的容器——**24bit 源用 `s32` 承载**（FLAC 记录的 `bits_per_raw_sample` 仍为 24），因此 24bit 母带不会被静默降为 16bit。输出文件的位深、采样率、声道数均与源一致。
 
@@ -241,7 +261,7 @@ python main.py "D:/Music/album.ape" "D:/Music/track.wav" -o "D:/Music/FLAC"
 
 **帧数怎么算**：ffprobe 的 `nb_frames` 对 WAV / FLAC 均返回 `N/A`；`-count_frames` 的 `nb_read_frames` 统计的是解码包数而非采样帧数（实测同一段音频 WAV 报 44、FLAC 报 39，真实值 177600），不可用。程序改用**解码后的 s32le 字节数 ÷ (4 × 声道数)** 推算，与 MD5 比对同源，既精确又能真实反映截断。
 
-**采样率取哪个值**：ffprobe 报告的是**容器**声明的采样率，而解码器实际输出的采样率可能不同 —— DSD 容器声明 2.8224MHz，ffmpeg 的 DSD 解码器固定 8× 抽取、实际输出 352.8kHz。程序因此取 **ffmpeg 解码后的真实速率**来推算帧数与时长，否则时长会算错。
+**采样率取哪个值**：ffprobe 报告的是**容器**声明的采样率，而解码器实际输出的采样率可能不同 —— DSD 容器声明 2.8224MHz（这是 1-bit **比特率**），ffmpeg 解码后实际输出 352.8kHz PCM（相差 8 倍）。程序因此取 **ffmpeg 解码后的真实速率**来推算帧数与时长，否则时长会算错。
 
 ### 开关
 
@@ -272,6 +292,7 @@ cue2flac/
 │   ├── splitter.py         # 分轨核心（ffmpeg 切片 + 元数据 + 文件名安全化）
 │   ├── batch.py            # 批量扫描目录 / 汇总结果 / 输出目录防重名
 │   ├── convert.py          # 不依赖 CUE 的整轨直转 FLAC（位深保持 / 无损校验）
+│   ├── dsd.py              # DSD（.dsf/.dff）转换策略（低通 + 降采样，分轨与直转共用）
 │   ├── verify.py           # 统一无损校验（可播放 / 参数 / 帧数时长 / PCM 逐字节）
 │   ├── config.py           # 轻量配置持久化（默认输出目录）
 │   ├── layout.py           # 按钮自动折行算法（纯函数，供 GUI 复用）
@@ -287,6 +308,8 @@ cue2flac/
 │   ├── test_cue_parser.py
 │   ├── test_batch.py
 │   ├── test_convert.py    # 直转测试（位深保持 / 无损 MD5 实证；需 ffmpeg）
+│   ├── test_dsd.py       # DSD 分轨/直转测试（.dsf/.dff 端到端；需 ffmpeg）
+│   ├── dsd_fixtures.py   # 构造真实 DSF / DFF 容器（ffmpeg 无 DSD 封装器）
 │   ├── test_verify.py
 │   ├── test_layout.py
 │   ├── test_workflow.py   # CI 工作流静态校验（YAML / PowerShell 语法）
@@ -312,6 +335,7 @@ pyinstaller --noconfirm --onefile --name cue2flac ^
   --hidden-import cue2flac.splitter ^
   --hidden-import cue2flac.batch ^
   --hidden-import cue2flac.convert ^
+  --hidden-import cue2flac.dsd ^
   --hidden-import cue2flac.config ^
   --hidden-import cue2flac.verify ^
   --hidden-import cue2flac.layout ^
@@ -323,7 +347,7 @@ pyinstaller --noconfirm --onefile --name cue2flac ^
   main.py
 ```
 
-> 注意：`--hidden-import` 必须包含 `config` / `verify` / `layout` / `convert` 等所有被动态导入或反射引用的子模块，否则打包后运行会因找不到模块而报错（缺少 `convert` 会导致「不依赖 CUE 的直接转换」功能在 exe 中不可用）。ffmpeg/ffprobe 通过 `--add-binary` 内嵌到 `ffmpeg/` 子目录下，由 `ffmpeg_provider.resolve_tool` 在运行时定位。
+> 注意：`--hidden-import` 必须包含 `config` / `verify` / `layout` / `convert` / `dsd` 等所有被动态导入或反射引用的子模块，否则打包后运行会因找不到模块而报错（缺少 `convert` 会导致「不依赖 CUE 的直接转换」功能在 exe 中不可用，缺少 `dsd` 会导致 DSD 源处理失败）。ffmpeg/ffprobe 通过 `--add-binary` 内嵌到 `ffmpeg/` 子目录下，由 `ffmpeg_provider.resolve_tool` 在运行时定位。
 
 ---
 

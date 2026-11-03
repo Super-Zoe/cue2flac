@@ -27,6 +27,15 @@ from typing import Callable, List, Optional
 
 from .ffmpeg_provider import resolve_tool
 from .verify import probe_audio, pcm_md5, decode_ok, verify_output
+from .dsd import (
+    DSD_TARGETS,
+    dsd_filter,
+    dsd_note,
+    dsd_plan,
+    dsd_rate,
+    dsd_target,
+    is_dsd,
+)
 
 # ---------------------------------------------------------------------------
 # 格式常量
@@ -43,18 +52,6 @@ SUPPORTED_EXTS = (
 
 #: DSD（1-bit）容器扩展名。
 DSD_EXTS = (".dsf", ".dff")
-
-#: DSD 转换时的目标采样率与低通截止频率（按 DSD 档位区分）。
-#:
-#: DSD64 = 2.8224MHz，ffmpeg 的 DSD 解码器固定按 8× 抽取 → 352.8kHz PCM，
-#: 再由 aresample 抽到目标采样率。DSD 噪声整形会把量化噪声推到超声频段，
-#: 因此必须先用 lowpass 截止掉，否则输出里全是嘶嘶声。
-_DSD_TARGETS = {
-    # dsd_rate -> (目标采样率, 低通截止 Hz)
-    2822400: (88200, 24000),    # DSD64
-    5644800: (176400, 40000),   # DSD128
-    11289600: (352800, 80000),  # DSD256
-}
 
 
 class ConvertError(RuntimeError):
@@ -133,17 +130,12 @@ def _detect_bits(src: str, ffprobe: str) -> int:
 
 def _is_dsd(src: str, ffprobe: str) -> bool:
     """判断源是否为 DSD（按容器扩展名或 ffprobe 解码器名）。"""
-    if os.path.splitext(src)[1].lower() in DSD_EXTS:
-        return True
-    params = probe_audio(src, ffprobe)
-    codec = (params or {}).get("codec", "").lower()
-    return codec.startswith("dsd")
+    return is_dsd(src, ffprobe)
 
 
 def _dsd_rate(src: str, ffprobe: str) -> int:
-    """探测 DSD 源码流的比特率（DSD64 = 2822400 等）。"""
-    params = probe_audio(src, ffprobe)
-    return int((params or {}).get("sample_rate") or 0)
+    """探测 DSD 源的解码输出采样率（DSD64 = 352800 Hz）。"""
+    return dsd_rate(src, ffprobe)
 
 
 def _copy_tags(src: str, dst: str, ff: str) -> None:
@@ -271,21 +263,14 @@ def convert_file(
 
     if dsd:
         # ---- DSD 路径：低通 + 抽取降采样（高质量转换，非逐样本无损）----
-        rate = _dsd_rate(src, ffprobe)
-        target_sr, cutoff = _DSD_TARGETS.get(
-            rate, (88200 if rate >= 2822400 else 44100, 24000)
-        )
+        target_sr, cutoff, filt, note = dsd_plan(src, ffprobe)
         cmd += [
-            "-af", f"lowpass=f={cutoff},aresample=resampler=soxr:osr={target_sr}",
+            "-af", filt,
             "-ar", str(target_sr),
             "-c:a", "flac",
             "-sample_fmt", "s32",
         ]
-        res.note = (
-            f"DSD 源（1-bit 编码）：已按标准做法低通滤波（截止 {cutoff} Hz）"
-            f"并抽取降采样至 {target_sr} Hz / 32-bit FLAC。"
-            f"此过程属于高质量转换，并非逐样本无损。"
-        )
+        res.note = note
         if on_progress:
             on_progress(f"  {res.name}：DSD 转换 → {target_sr} Hz FLAC\n")
     else:

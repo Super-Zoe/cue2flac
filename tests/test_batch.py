@@ -245,3 +245,43 @@ def test_expand_to_inputs_empty():
     assert cues == []
     assert audios == []
 
+
+
+def test_expand_to_inputs_excludes_generated_track_outputs():
+    """程序自己生成的分轨产物不应再被当成母带直转。
+
+    回归防护：分轨输出命名为「NN. 标题.flac」。若不排除，重复扫描同一
+    目录会把上一次的输出再转一遍，输出目录不断膨胀。
+    """
+    fake_tree = tempfile.mkdtemp()
+    cue_path = os.path.join(fake_tree, "album.cue")
+    with open(cue_path, "w", encoding="utf-8", newline="\r\n") as f:
+        f.write('FILE "master.wav" WAVE\r\n'
+                '  TRACK 01 AUDIO\r\n    TITLE "第一首"\r\n    INDEX 01 00:00:00\r\n'
+                '  TRACK 02 AUDIO\r\n    TITLE "第二首"\r\n    INDEX 01 00:01:00\r\n')
+    # 模拟上一次分轨的产物
+    out_dir = os.path.join(fake_tree, "未命名")
+    os.makedirs(out_dir, exist_ok=True)
+    for name in ("01. 第一首.flac", "02. 第二首.flac"):
+        with open(os.path.join(out_dir, name), "wb") as f:
+            f.write(b"\x00\x00")
+
+    cues, audios = batch.expand_to_inputs([fake_tree], recursive=True)
+    assert len(cues) == 1
+    assert audios == [], "分轨产物不应进入直转列表: %s" % audios
+
+
+def test_expand_to_inputs_keeps_real_master_named_like_track():
+    """真实母带即使命名为「NN. 标题」也不应被误排除。
+
+    回归防护：按曲目编号命名的整轨专辑很常见（如「01. 某专辑.ape」），
+    不能仅凭文件名形态就把它当成分轨产物丢弃。
+    """
+    fake_tree = tempfile.mkdtemp()
+    audio = os.path.join(fake_tree, "01. 某专辑.ape")
+    with open(audio, "wb") as f:
+        f.write(b"\x00\x00")
+    cues, audios = batch.expand_to_inputs([fake_tree], recursive=True)
+    assert cues == []
+    assert len(audios) == 1
+    assert os.path.basename(audios[0]) == "01. 某专辑.ape"

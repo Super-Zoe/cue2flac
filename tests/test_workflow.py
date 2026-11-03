@@ -214,3 +214,38 @@ def test_direct_convert_smoke_asserts_verification_output():
     )
     assert "校验：采样率" in runs, "直转冒烟未断言逐项校验输出"
     assert "（无损）" in runs, "直转冒烟未断言校验结论为无损"
+
+
+def test_dsd_split_smoke_exists_and_asserts_sample_rate():
+    """CI 必须有 DSD 分轨冒烟，并断言输出采样率被降到 88200Hz。
+
+    回归防护：DSD64 解码率为 352800Hz，超出 FLAC 编码器上限。
+    分轨链路若漏了降采样，ffmpeg 会直接报 "352800 Hz not supported"，
+    DSD 源分轨 100% 失败。冒烟必须能发现这一点。
+    """
+    data = _load()
+    steps = [
+        st
+        for job in data["jobs"].values()
+        for st in job.get("steps", [])
+    ]
+    dsd_steps = [st for st in steps if "DSD" in str(st.get("name", ""))]
+    assert dsd_steps, "CI 缺少 DSD 分轨冒烟步骤"
+
+    run = "\n".join(str(st.get("run", "")) for st in dsd_steps)
+    assert "'88200'" in run, "DSD 冒烟未断言输出采样率为 88200Hz"
+    assert "bits_per_raw_sample" in run, "DSD 冒烟未断言输出位深"
+    assert "not supported" in run, "DSD 冒烟未说明降采样的必要性"
+    # 不得依赖 tests/ 目录下的辅助模块（CI 不打包测试文件）
+    assert "dsd_fixtures" not in run, "CI 冒烟不应依赖 tests/ 下的模块"
+
+
+def test_hidden_imports_include_dsd_module():
+    """打包必须包含 cue2flac.dsd，否则 exe 中 DSD 处理会失败。"""
+    data = _load()
+    runs = "\n".join(
+        str(step.get("run", ""))
+        for job in data["jobs"].values()
+        for step in job.get("steps", [])
+    )
+    assert "--hidden-import cue2flac.dsd" in runs, "打包缺少 cue2flac.dsd 的 hidden-import"

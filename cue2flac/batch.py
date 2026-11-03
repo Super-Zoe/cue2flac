@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Tuple
 
@@ -20,6 +21,13 @@ from .convert import (
     convert_files,
     format_convert_summary,
 )
+
+#: 分轨输出文件名特征：``NN. 标题``（见 splitter._safe_name）。
+#: 用于识别「程序自己生成的分轨产物」，避免重复扫描时把输出再当母带转换。
+#:
+#: 注意 ``\\s+?`` 用非贪婪匹配——否则它会把标题的首个字符也吃掉
+#: （``01. 第一首`` 会变成 ``一首``，导致与 CUE 标题比不上）。
+_TRACK_OUT_NAME_RE = re.compile(r"^(\d{1,3})\.\s+?(\S.*)$")
 
 
 @dataclass
@@ -158,6 +166,9 @@ def expand_to_inputs(
 
     # 收集被 CUE 引用的音源（按解析后的绝对路径）
     referenced: set[str] = set()
+    # 本批 CUE 的曲目标题集合——分轨产物命名为「NN. <曲目标题>.flac」，
+    # 用它来识别「程序自己生成的分轨产物」。
+    track_titles: set[str] = set()
     for cue in cues:
         try:
             sheet = parse_cue(cue, audio_hint=audio_hint)
@@ -166,6 +177,25 @@ def expand_to_inputs(
         for tr in sheet.tracks:
             if tr.file:
                 referenced.add(os.path.abspath(tr.file))
+            if tr.title:
+                track_titles.add(tr.title.strip().lower())
+
+    def _is_generated_output(path: str) -> bool:
+        """判断路径是否是**本批 CUE 生成的分轨产物**。
+
+        分轨输出命名为 ``NN. <曲目标题>.flac``（见 splitter._safe_name），
+        而文件名里的序号 + 标题必须与某个 CUE 的曲目对得上，才认定为产物。
+        仅凭「NN. 开头」判断会误伤真实母带——按曲目编号命名的整轨专辑
+        （如 ``01. 某专辑.ape``）也很常见。
+        """
+        stem = os.path.splitext(os.path.basename(path))[0]
+        m = _TRACK_OUT_NAME_RE.match(stem)
+        if not m:
+            return False
+        title = m.group(2).strip().lower()
+        if not title:
+            return False
+        return any(title == t or title.startswith(t) for t in track_titles)
 
     audios: List[str] = []
     seen: set[str] = set()
@@ -174,7 +204,8 @@ def expand_to_inputs(
             ext = os.path.splitext(p)[1].lower()
             if ext in SUPPORTED_EXTS:
                 ap = os.path.abspath(p)
-                if ap not in referenced and ap not in seen:
+                if ap not in referenced and ap not in seen \
+                        and not _is_generated_output(ap):
                     seen.add(ap)
                     audios.append(ap)
         elif os.path.isdir(p):
@@ -183,7 +214,8 @@ def expand_to_inputs(
             except Exception:  # noqa: BLE001
                 found = []
             for f in found:
-                if f not in referenced and f not in seen:
+                if f not in referenced and f not in seen \
+                        and not _is_generated_output(f):
                     seen.add(f)
                     audios.append(f)
     audios.sort(key=lambda x: x.lower())

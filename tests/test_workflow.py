@@ -249,3 +249,25 @@ def test_hidden_imports_include_dsd_module():
         for step in job.get("steps", [])
     )
     assert "--hidden-import cue2flac.dsd" in runs, "打包缺少 cue2flac.dsd 的 hidden-import"
+
+
+def test_ci_tool_paths_exist_in_workspace_root():
+    """CI 步骤里调用的 ffmpeg / ffprobe 必须用仓库根目录的相对路径。
+
+    回归防护：打包步骤把 ffmpeg.exe / ffprobe.exe 复制到**仓库根目录**
+    （`Copy-Item $fp.FullName ffprobe.exe`），不是 `ffmpeg/` 子目录。
+    写成 `./ffmpeg/ffprobe.exe` 会报
+    "The term './ffmpeg/ffprobe.exe' is not recognized"。
+    """
+    data = _load()
+    runs = "\n".join(
+        str(step.get("run", ""))
+        for job in data["jobs"].values()
+        for step in job.get("steps", [])
+    )
+    assert "./ffmpeg/ffprobe.exe" not in runs, \
+        "CI 中 ffprobe 的路径不对：它在仓库根目录，不在 ffmpeg/ 子目录"
+    assert "./ffprobe.exe" in runs, "CI 应使用仓库根目录的 ffprobe.exe"
+    # ffmpeg 可执行文件同理
+    assert "./ffmpeg/ffmpeg.exe" not in runs, \
+        "CI 中 ffmpeg 的路径不对：它在仓库根目录，不在 ffmpeg/ 子目录"

@@ -288,13 +288,13 @@ jobs:
             foreach ($f in $files) {
               # 必须被降采样到 88200Hz（若仍为 352800Hz 说明漏了降采样，
               # 而 352800Hz 会被 FLAC 编码器直接拒绝，报 "not supported"）
-              $rate = (./ffmpeg/ffprobe.exe -v error -show_entries stream=sample_rate -of csv=p=0 $f.FullName)
+              $rate = (./ffprobe.exe -v error -show_entries stream=sample_rate -of csv=p=0 $f.FullName)
               if ($rate.Trim() -ne '88200') {
                 Write-Error "${ext}: 输出采样率应为 88200，实际 $($rate.Trim())"
                 exit 1
               }
               # 位深必须是 24（s32 承载 24 位有效数据）
-              $bits = (./ffmpeg/ffprobe.exe -v error -show_entries stream=bits_per_raw_sample -of csv=p=0 $f.FullName)
+              $bits = (./ffprobe.exe -v error -show_entries stream=bits_per_raw_sample -of csv=p=0 $f.FullName)
               if ($bits.Trim() -ne '24') {
                 Write-Error "${ext}: 输出位深应为 24，实际 $($bits.Trim())"
                 exit 1

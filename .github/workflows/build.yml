@@ -278,10 +278,18 @@ jobs:
           ./ffmpeg.exe -f lavfi -i anullsrc=r=44100:cl=stereo -t 3 -y verifycase\src.wav 2>$null
           ./ffmpeg.exe -y -i verifycase\src.wav -ar 22050 -c:a flac verifycase\bad.flac 2>$null
           # 用 Python 直接调用内置校验模块，断言能检出参数改动。
-          # 注意：不能用 @"..."@ 这种嵌套 here-string（结束标记必须顶格，
-          # 在缩进块里必然报错），改用数组 -join 拼接。
+          # 注意两点：
+          # ① 不能用 @"..."@ 这种嵌套 here-string（结束标记必须顶格，
+          #    在缩进块里必然报错），改用数组 -join 拼接；
+          # ② 结果含中文，而 CI runner 的 stdout 编码是 cp1252，
+          #    直接 print 会抛 UnicodeEncodeError。
+          #    因此把结果重定向到 UTF-8 文件再由 PowerShell 读取。
           $pyLines = @(
             "import sys",
+            "try:",
+            "    sys.stdout.reconfigure(encoding='utf-8', errors='replace')",
+            "except Exception:",
+            "    pass",
             "sys.path.insert(0, '.')",
             "from cue2flac import verify as V",
             "from cue2flac.ffmpeg_provider import resolve_tool",
@@ -303,6 +311,7 @@ jobs:
             "print('VERIFY-DETECT OK')"
           )
           $pyLines -join "`n" | Set-Content -Encoding UTF8 verifycase\check.py
+          $env:PYTHONIOENCODING = "utf-8"
           $out = python verifycase\check.py 2>&1 | Out-String
           Write-Host $out
           if ($out -notmatch 'VERIFY-DETECT OK') {

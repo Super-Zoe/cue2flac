@@ -104,9 +104,88 @@ FILE "album" WAVE
             )
 
 
+def test_fuzzy_match_when_cue_filename_differs():
+    """CUE 的 FILE 行与磁盘文件名不一致时（如多出表演者前缀）应自动匹配。
+
+    真实案例：CUE 写 ``The Best Moment精选-CD1.ape``，
+    磁盘文件叫 ``陈奕迅-The Best Moment精选-CD1.ape``。
+    """
+    cue = """PERFORMER "陳奕迅"
+TITLE "The Best Moment精选"
+FILE "The Best Moment精选-CD1.ape" WAVE
+  TRACK 01 AUDIO
+    TITLE "岁月如歌"
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    TITLE "K歌之王"
+    INDEX 01 03:28:51
+"""
+    with tempfile.TemporaryDirectory() as d:
+        real = os.path.join(d, "陈奕迅-The Best Moment精选-CD1.ape")
+        with open(real, "wb") as f:
+            f.write(b"\x00\x00")
+        cue_path = os.path.join(d, "陈奕迅-The Best Moment精选-CD1.cue")
+        with open(cue_path, "w", encoding="gbk") as f:
+            f.write(cue)
+
+        sheet = parse_cue(cue_path)
+        assert os.path.isfile(sheet.tracks[0].file), "未定位到实际存在的音频文件"
+        assert os.path.basename(sheet.tracks[0].file) == os.path.basename(real)
+        # 应记录一条提示，说明发生了自动匹配
+        assert sheet.notes, "自动匹配后未产生提示信息"
+        assert "自动匹配" in sheet.notes[0]
+
+
+def test_fuzzy_match_picks_correct_disc_among_many():
+    """同目录存在多张 CD 时，应按相似度选中正确的那一张。"""
+    cue = """TITLE "Album"
+FILE "Album-CD2.ape" WAVE
+  TRACK 01 AUDIO
+    TITLE "Track One"
+    INDEX 01 00:00:00
+"""
+    with tempfile.TemporaryDirectory() as d:
+        for name in ("Artist-Album-CD1.ape", "Artist-Album-CD2.ape"):
+            with open(os.path.join(d, name), "wb") as f:
+                f.write(b"\x00\x00")
+        cue_path = os.path.join(d, "Album.cue")
+        with open(cue_path, "w", encoding="utf-8") as f:
+            f.write(cue)
+
+        sheet = parse_cue(cue_path)
+        assert os.path.basename(sheet.tracks[0].file) == "Artist-Album-CD2.ape", (
+            f"选错了音频文件：{sheet.tracks[0].file}"
+        )
+
+
+def test_exact_match_takes_priority_over_fuzzy():
+    """存在完全同名的文件时，必须优先使用它，而不是模糊匹配的其它文件。"""
+    cue = """TITLE "Album"
+FILE "album.ape" WAVE
+  TRACK 01 AUDIO
+    TITLE "Track One"
+    INDEX 01 00:00:00
+"""
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "album.ape"), "wb") as f:
+            f.write(b"\x00\x00")
+        with open(os.path.join(d, "Other-Name-album.ape"), "wb") as f:
+            f.write(b"\x00\x00")
+        cue_path = os.path.join(d, "album.cue")
+        with open(cue_path, "w", encoding="utf-8") as f:
+            f.write(cue)
+
+        sheet = parse_cue(cue_path)
+        assert os.path.basename(sheet.tracks[0].file) == "album.ape"
+        assert not sheet.notes, "精确匹配时不应产生自动匹配提示"
+
+
 if __name__ == "__main__":
     test_parse_basic()
     test_timecode_seconds()
     test_gbk_decoding()
     test_audio_extension_fallback_includes_dsd()
+    test_fuzzy_match_when_cue_filename_differs()
+    test_fuzzy_match_picks_correct_disc_among_many()
+    test_exact_match_takes_priority_over_fuzzy()
     print("All tests passed.")

@@ -87,6 +87,33 @@ def _detect_sample_fmt(audio_path: str, ffprobe: str) -> str:
     return ""
 
 
+def _missing_audio_hint(audio_path: str) -> str:
+    """音频缺失时，列出同目录下的候选音频文件，便于用户快速定位。"""
+    d = os.path.dirname(os.path.abspath(audio_path)) if audio_path else ""
+    if not d or not os.path.isdir(d):
+        return ""
+    try:
+        entries = sorted(
+            e for e in os.listdir(d)
+            if os.path.splitext(e)[1].lower() in _AUDIO_EXTS
+            and os.path.isfile(os.path.join(d, e))
+        )
+    except OSError:
+        return ""
+    if not entries:
+        return ""
+    shown = entries[:8]
+    extra = f" 等 {len(entries)} 个文件" if len(entries) > len(shown) else ""
+    return "同目录下的音频文件：" + "、".join(shown) + extra
+
+
+# 常见整轨音频扩展名（用于缺失提示与格式判定）
+_AUDIO_EXTS = (
+    ".flac", ".wav", ".wv", ".ape", ".tta", ".tak", ".m4a",
+    ".dsf", ".dff", ".aiff", ".aif", ".alac", ".mp3", ".ogg", ".opus",
+)
+
+
 def _safe_name(tr: Track, total: int) -> str:
     """生成安全的输出文件名：NN. 标题（必要时追加表演者去重）。"""
     title = (tr.title or f"Track {tr.number:02d}").strip()
@@ -147,9 +174,11 @@ def split(
 
     for idx, tr in enumerate(sheet.tracks, 1):
         if not tr.file or not os.path.isfile(tr.file):
+            hint = _missing_audio_hint(tr.file or "")
             raise FileNotFoundError(
                 f"音轨 {tr.number} 的音频文件不存在或未找到：{tr.file}\n"
-                f"请用 --audio 指定正确的整轨音频文件。"
+                + (f"{hint}\n" if hint else "")
+                + f"请用 --audio 指定正确的整轨音频文件。"
             )
         if not sample_fmt and not is_dsd:
             sample_fmt = _detect_sample_fmt(tr.file, ffprobe)

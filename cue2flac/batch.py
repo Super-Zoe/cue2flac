@@ -175,6 +175,11 @@ def process_cues(
                 on_progress(f"[跳过] {os.path.basename(cue)}\n  原因：{e}\n")
             continue
 
+        # 1.5) 输出解析提示（如音源文件名不一致被自动匹配）
+        for note in getattr(sheet, "notes", []) or []:
+            if on_progress:
+                on_progress(f"[提示] {note}\n")
+
         # 2) 确定输出目录
         cue_dir = os.path.dirname(os.path.abspath(cue))
         album = sheet.album_title or os.path.splitext(os.path.basename(cue))[0]

@@ -492,6 +492,10 @@ class App(tk.Tk):
             self.batch_cue_paths.append(os.path.abspath(cue))
             self._cue_map[parent] = os.path.abspath(cue)
 
+            # 音源文件名与 CUE 不一致而被自动匹配时，明确告知用户
+            for note in getattr(sheet, "notes", []) or []:
+                self.log(f"[提示] {os.path.basename(cue)}：{note}\n")
+
         self.tree.tag_configure("cue", foreground=CUE_COLOR)
         self.tree.tag_configure("fail", foreground=FAIL_COLOR)
 

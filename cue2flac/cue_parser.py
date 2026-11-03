@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import difflib
 import os
 import re
 from dataclasses import dataclass, field
@@ -37,6 +38,8 @@ class CueSheet:
     date: Optional[str] = None
     comment: Optional[str] = None
     tracks: List[Track] = field(default_factory=list)
+    # 解析过程中的提示信息（如音频文件名不一致被自动匹配）
+    notes: List[str] = field(default_factory=list)
 
     @property
     def total_tracks(self) -> int:
@@ -75,6 +78,17 @@ def _parse_time(s: str) -> float:
 
 _QUOTED = re.compile(r'^"(.*)"$')
 
+# 常见整轨音频扩展名（用于模糊定位音源时的候选筛选）
+_AUDIO_EXTS = (
+    ".flac", ".wav", ".wv", ".ape", ".tta", ".tak", ".m4a",
+    ".dsf", ".dff", ".aiff", ".aif", ".alac", ".mp3", ".ogg", ".opus",
+)
+
+# 扩展名回退顺序：当 CUE 的 FILE 行省略扩展名时依次尝试
+_EXT_FALLBACK = (
+    ".flac", ".wav", ".wv", ".ape", ".tta", ".tak", ".m4a", ".dsf", ".dff", "",
+)
+
 
 def _unquote(s: str) -> str:
     s = s.strip()
@@ -84,19 +98,110 @@ def _unquote(s: str) -> str:
     return s
 
 
-def _resolve_audio(fname: str, cue_dir: str, hint: Optional[str]) -> str:
-    """在多处尝试定位音频文件，返回绝对路径（找不到时仍返回基于 CUE 目录的推测路径）。"""
+def _norm_stem(stem: str) -> str:
+    """把文件名主干归一化：仅保留字母/数字/汉字（去掉空格、标点、连字符）。"""
+    return "".join(ch.lower() for ch in stem if ch.isalnum())
+
+
+def _match_score(want: str, cand_stem: str) -> float:
+    """评估候选文件名与 CUE 中 FILE 名���的相似度（0~1）。
+
+    真实场景中 CUE 里的 FILE 行常与磁盘文件名不一致（例如 CUE 写
+    ``The Best Moment精选-CD1.ape``，实际文件叫
+    ``陈奕迅-The Best Moment精选-CD1.ape``，多出表演者前缀），
+    因此需要按「包含关系 + 相似度」做模糊匹配。
+    """
+    w = _norm_stem(want)
+    c = _norm_stem(cand_stem)
+    if not w or not c:
+        return 0.0
+    if w == c:
+        return 1.0
+    short, long_ = (w, c) if len(w) <= len(c) else (c, w)
+    if long_.endswith(short):
+        # 候选名以期望名结尾（典型：磁盘文件多了表演者前缀）
+        return 0.90 + 0.09 * (len(short) / len(long_))
+    if long_.startswith(short):
+        return 0.86 + 0.09 * (len(short) / len(long_))
+    if short in long_:
+        return 0.72 + 0.08 * (len(short) / len(long_))
+    return difflib.SequenceMatcher(None, w, c).ratio() * 0.70
+
+
+def _fuzzy_find_audio(fname: str, cue_dir: str) -> Optional[str]:
+    """在 CUE 所在目录中模糊查找最匹配的音频文件，找不到返回 None。"""
+    want_base = os.path.splitext(os.path.basename(fname))[0]
+    want_ext = os.path.splitext(fname)[1].lower()
+    try:
+        entries = os.listdir(cue_dir)
+    except OSError:
+        return None
+
+    cands = [
+        e for e in entries
+        if os.path.splitext(e)[1].lower() in _AUDIO_EXTS
+        and os.path.isfile(os.path.join(cue_dir, e))
+    ]
+    if not cands:
+        return None
+
+    # 目录里只有一个音频文件时直接采用（最常见的单专辑目录情形）
+    if len(cands) == 1:
+        return os.path.abspath(os.path.join(cue_dir, cands[0]))
+
+    best: Optional[str] = None
+    best_score = 0.0
+    for e in cands:
+        stem = os.path.splitext(e)[0]
+        score = _match_score(want_base, stem)
+        # 扩展名一致时给予加权，避免误选同目录里的其它格式
+        if want_ext and os.path.splitext(e)[1].lower() == want_ext:
+            score += 0.03
+        if score > best_score:
+            best_score = score
+            best = e
+
+    if best is not None and best_score >= 0.60:
+        return os.path.abspath(os.path.join(cue_dir, best))
+    return None
+
+
+def _resolve_audio(
+    fname: str,
+    cue_dir: str,
+    hint: Optional[str],
+    notes: Optional[List[str]] = None,
+) -> str:
+    """在多处尝试定位音频文件，返回绝对路径（找不到时仍返回基于 CUE 目录的推测路径）。
+
+    定位顺序：
+      1. ``--audio`` 显式指定的文件；
+      2. CUE 目录下的同名文件（含 FILE 行里可能带的子目录）；
+      3. 同主干 + 各种扩展名的回退；
+      4. 同目录下的模糊匹配（磁盘文件名与 CUE 不完全一致时，如多出表演者前缀）。
+    """
     candidates: List[str] = []
     if hint:
         candidates.append(hint)
     candidates.append(os.path.join(cue_dir, fname))
     candidates.append(fname)
     base, _ext = os.path.splitext(fname)
-    for ext in (".flac", ".wav", ".wv", ".ape", ".tta", ".tak", ".m4a", ".dsf", ".dff", ""):
+    for ext in _EXT_FALLBACK:
         candidates.append(os.path.join(cue_dir, base + ext))
     for c in candidates:
         if c and os.path.isfile(c):
             return os.path.abspath(c)
+
+    # 精确匹配全部失败 → 模糊匹配
+    fuzzy = _fuzzy_find_audio(fname, cue_dir)
+    if fuzzy:
+        if notes is not None:
+            notes.append(
+                f"CUE 中声明的音频文件「{fname}」不存在，"
+                f"已自动匹配到同目录下的「{os.path.basename(fuzzy)}」。"
+            )
+        return fuzzy
+
     return os.path.abspath(os.path.join(cue_dir, fname))
 
 
@@ -154,7 +259,7 @@ def parse_cue(path: str, audio_hint: Optional[str] = None) -> CueSheet:
             )
             fname = m.group(1) if m else None
             if fname:
-                current_file = _resolve_audio(fname, cue_dir, audio_hint)
+                current_file = _resolve_audio(fname, cue_dir, audio_hint, sheet.notes)
             in_track = False
             current_track = None
             continue

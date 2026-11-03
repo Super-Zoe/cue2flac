@@ -1,11 +1,14 @@
-"""Tkinter 图形界面：单一拖放区域批量分轨。
+"""Tkinter 图形界面：单一拖放区域，支持「按 CUE 分轨」与「整轨直转 FLAC」。
 
 唯一的输入是一个文件拖放区域，支持把单个 / 多个文件、文件夹拖入：
-- 系统自动识别并解析其完整路径，递归遍历以查找其中全部 .cue 文件；
-- 读取每个 CUE 并提取完整信息（音轨标题、表演者、专辑、时长、音轨序号等），
-  支持批量识别多个 CUE；
+- 系统自动识别并解析其完整路径，递归遍历；
+- **.cue 文件**：解析出完整信息（音轨标题、表演者、专辑、时长、音轨序号等），
+  依据 INDEX 时间码把整轨音频切成多首独立 FLAC；
+- **无损音频（.flac/.wav/.ape/.dsf/.dff 等）**：不依赖 CUE，整轨直接转成一个 FLAC
+  （PCM 系逐样本无损；DSD 属高质量转换，会明确标注）；
+- 两种任务可在同一次拖放中混合处理，已被 CUE 引用的母带不会被重复转换；
 - 以清晰列表展示解析结果（含文件名、所在路径与解析出的元数据明细）；
-- 点击「开始转换」后，依据各 CUE 文件中的信息对相关音频执行转换处理。
+- 点击「开始转换」后执行转换，并对输出 FLAC 做可播放 / 参数 / 无损验证。
 
 拖放基于 Windows 原生 COM IDropTarget（零依赖）；非 Windows 下自动降级为浏览按钮。
 
@@ -26,8 +29,9 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from cue2flac.cue_parser import parse_cue
-from cue2flac.batch import process_cues, expand_to_cues
+from cue2flac.batch import process_cues, process_all, expand_to_inputs, expand_to_cues
 from cue2flac.config import get_out_dir, set_out_dir
+from cue2flac.convert import SUPPORTED_EXTS, is_supported_audio
 from cue2flac.layout import plan_rows
 
 # 拖放为 Windows 原生实现（零依赖）；非 Windows 下 enable_drop 自动空操作。
@@ -43,6 +47,7 @@ OK_COLOR = "#2e9e5b"       # 放下成功（绿）
 INVALID_COLOR = "#d9534f"  # 未找到 CUE（红）
 CUE_COLOR = "#1a5fb4"      # 解析结果列表中「CUE 行」
 FAIL_COLOR = "#d9534f"     # 解析失败行
+AUDIO_COLOR = "#7a3ea8"    # 解析结果列表中「直转音频行」
 
 
 def _fmt(seconds) -> str:
@@ -63,8 +68,12 @@ class App(tk.Tk):
 
         # 已成功解析、待处理的 CUE 路径
         self.batch_cue_paths: List[str] = []
+        # 待直接转换的音频文件路径（不依赖 CUE）
+        self.batch_audio_paths: List[str] = []
         # 结果树中「CUE 顶层行」的 iid → 对应 CUE 绝对路径（用于逐项删减）
         self._cue_map: dict[str, str] = {}
+        # 结果树中「直转音频行」的 iid → 对应音频绝对路径
+        self._audio_map: dict[str, str] = {}
         # 用户指定的统一输出目录（None = 使用内置默认：各 CUE 所在目录下的专辑名子文件夹）
         self.out_dir: Optional[str] = get_out_dir()
 
@@ -113,7 +122,9 @@ class App(tk.Tk):
             zone,
             text=(
                 "⬇    将「文件」或「文件夹」拖入此处    ⬇\n"
-                "支持单个 / 多个文件、整个文件夹（自动递归遍历其中的全部 .cue 文件）"
+                "支持单个 / 多个文件、整个文件夹（自动递归遍历）\n"
+                "① .cue → 按分轨表切分为多首 FLAC\n"
+                "② 无损音频（.flac/.wav/.ape/.dsf/.dff…）→ 整轨直接转为 FLAC"
             ),
             relief="groove",
             borderwidth=2,
@@ -185,7 +196,8 @@ class App(tk.Tk):
         self.out_desc = ttk.Label(
             out_frame,
             text=(
-                "留空 = 默认：各 CUE 所在目录下的『专辑名』子文件夹；"
+                "留空 = 默认：各 CUE 所在目录下的『专辑名』子文件夹，"
+                "直转音频则输出到其所在目录；"
                 "也可指定统一输出根目录（配置会被记住，下次自动复用）。"
             ),
         )
@@ -389,14 +401,18 @@ class App(tk.Tk):
     # ----------------------------------------------------- 选择（浏览回退）
     def _pick_files(self) -> None:
         paths = filedialog.askopenfilenames(
-            title="选择 .cue 文件（可多选）",
-            filetypes=[("CUE 文件", "*.cue"), ("所有文件", "*.*")],
+            title="选择 .cue 文件或可直接转换的音频文件（可多选）",
+            filetypes=[
+                ("CUE 文件", "*.cue"),
+                ("无损音频", "*.flac *.wav *.ape *.wv *.tta *.tak *.alac *.aiff *.dsf *.dff"),
+                ("所有文件", "*.*"),
+            ],
         )
         if paths:
             self._on_drop(list(paths))
 
     def _pick_folder(self) -> None:
-        d = filedialog.askdirectory(title="选择包含 .cue 的文件夹（含子目录）")
+        d = filedialog.askdirectory(title="选择包含 .cue 或音频文件的文件夹（含子目录）")
         if d:
             self._on_drop([d])
 
@@ -417,32 +433,44 @@ class App(tk.Tk):
 
     # ----------------------------------------------------- 拖放 / 选择处理
     def _on_drop(self, paths: List[str]) -> None:
-        """拖入文件 / 文件夹后：解析路径 → 递归收集全部 .cue → 列出解析结果。"""
+        """拖入文件 / 文件夹后：解析路径 → 收集 .cue 与可直接转换的音频 → 列出结果。"""
         self._highlight(False)
-        cues = expand_to_cues(paths, recursive=True)
-        if not cues:
+        cues, audios = expand_to_inputs(paths, recursive=True)
+        if not cues and not audios:
             self._flash(INVALID_COLOR)
-            self.status_label.config(text="未找到任何 .cue 文件")
-            self.log("拖入的内容中未找到任何 .cue 文件（请拖入文件夹或 .cue 文件）。\n")
+            self.status_label.config(text="未找到 .cue 文件或可转换的音频")
+            self.log(
+                "拖入的内容中未找到任何 .cue 文件或可转换的音频文件。\n"
+                "支持的音频格式：" + "、".join(SUPPORTED_EXTS) + "\n"
+            )
             return
 
         self.batch_cue_paths = []
-        self._populate_tree(cues)
+        self._populate_tree(cues, audios)
         self.btn_convert.config(state="normal")
         self._flash(OK_COLOR)
+        parts = []
+        if cues:
+            parts.append(f"{len(cues)} 个 CUE")
+        if audios:
+            parts.append(f"{len(audios)} 个音频文件")
         self.status_label.config(
-            text=f"已识别 {len(cues)} 个 CUE，点击「开始转换」开始处理"
+            text=f"已识别 {'、'.join(parts)}，点击「开始转换」开始处理"
         )
         self.log(
-            f"\n已发现并解析 {len(cues)} 个 CUE 文件，解析结果见上方列表。"
-            f"点击「开始转换」依据 CUE 信息转换音频。\n"
+            f"\n已发现 {len(cues)} 个 CUE 文件、{len(audios)} 个可直接转换的音频文件，"
+            f"解析结果见上方列表。点击「开始转换」开始处理。\n"
         )
 
-    def _populate_tree(self, cues: List[str]) -> None:
-        """解析每个 CUE 并在结果列表中展示全部内容（含解析失败项）。"""
+    def _populate_tree(self, cues: List[str], audios: Optional[List[str]] = None) -> None:
+        """解析每个 CUE 并在结果列表中展示全部内容（含解析失败项）。
+
+        直转条目（不依赖 CUE 的整轨音频）以独立顶层行展示，与 CUE 条目区分。
+        """
         for row in self.tree.get_children():
             self.tree.delete(row)
         self._cue_map.clear()
+        self._audio_map.clear()
 
         for cue in cues:
             try:
@@ -496,52 +524,103 @@ class App(tk.Tk):
             for note in getattr(sheet, "notes", []) or []:
                 self.log(f"[提示] {os.path.basename(cue)}：{note}\n")
 
+        # 不依赖 CUE 的直转条目：整轨音频 → 一个 FLAC
+        for audio in audios or []:
+            ap = os.path.abspath(audio)
+            ext = os.path.splitext(ap)[1].lower().lstrip(".")
+            iid = self.tree.insert(
+                "",
+                "end",
+                text=os.path.basename(ap),
+                values=(
+                    os.path.dirname(ap),
+                    "（直接转换）",
+                    ext.upper(),
+                    "",
+                    "整轨 → 1 首",
+                ),
+                tags=("audio",),
+            )
+            self._audio_map[iid] = ap
+            self.batch_audio_paths.append(ap)
+
         self.tree.tag_configure("cue", foreground=CUE_COLOR)
         self.tree.tag_configure("fail", foreground=FAIL_COLOR)
+        self.tree.tag_configure("audio", foreground=AUDIO_COLOR)
 
     # ----------------------------------------------------- 转换执行
     def _on_convert(self) -> None:
-        if not self.batch_cue_paths:
+        if not self.batch_cue_paths and not self.batch_audio_paths:
             return
         self.btn_convert.config(state="disabled")
         self.status_label.config(text="正在转换…")
-        self.log("\n开始依据 CUE 信息转换音频…\n")
         cue_paths = list(self.batch_cue_paths)
+        audio_paths = list(self.batch_audio_paths)
+        if audio_paths and not cue_paths:
+            self.log("\n开始直接转换音频（不依赖 CUE）…\n")
+        else:
+            self.log("\n开始依据 CUE 信息转换音频…\n")
         threading.Thread(
-            target=self._runner, args=(cue_paths,), daemon=True
+            target=self._runner, args=(cue_paths, audio_paths), daemon=True
         ).start()
 
-    def _runner(self, cue_paths: List[str]) -> None:
+    def _runner(self, cue_paths: List[str], audio_paths: List[str]) -> None:
         try:
-            result = process_cues(
-                cue_paths,
-                out=self.out_dir,  # None = 每个 CUE 在其所在目录下的 <专辑名> 子文件夹中输出
-                copy_cover=True,
-                verify=True,  # 转换完成后逐文件验证：可播放 / 参数匹配 / 无损无截断
-                on_progress=self.log,
-            )
-            success = result.success_count
-            skip = result.skip_count
-            if success == 0:
+            result = None
+            conv_ok = conv_fail = 0
+
+            # ① CUE 分轨
+            if cue_paths:
+                result = process_cues(
+                    cue_paths,
+                    out=self.out_dir,  # None = 每个 CUE 在其所在目录下的 <专辑名> 子文件夹中输出
+                    copy_cover=True,
+                    verify=True,  # 转换完成后逐文件验证：可播放 / 参数匹配 / 无损无截断
+                    on_progress=self.log,
+                )
+
+            # ② 不依赖 CUE 的直接转换
+            if audio_paths:
+                from cue2flac.convert import convert_files, format_convert_summary
+
+                if result is None:
+                    self.log("\n开始直接转换音频（不依赖 CUE）…\n")
+                else:
+                    self.log("\n开始直接转换音频（不依赖 CUE）…\n")
+                convert_results = convert_files(
+                    audio_paths,
+                    out_dir=self.out_dir,
+                    copy_cover=True,
+                    verify=True,
+                    on_progress=self.log,
+                )
+                self.log("\n" + format_convert_summary(convert_results) + "\n")
+                conv_ok = sum(1 for r in convert_results if r.ok)
+                conv_fail = len(convert_results) - conv_ok
+
+            success = result.success_count if result is not None else 0
+            skip = result.skip_count if result is not None else 0
+            if success == 0 and conv_ok == 0:
                 self.after(0, lambda: messagebox.showwarning(
                     "转换结果",
-                    f"未成功处理任何 CUE（跳过 {skip} 个），详见日志。",
+                    f"未成功处理任何文件（跳过 {skip} 个，失败 {conv_fail} 个），详见日志。",
                 ))
             else:
                 self.after(0, lambda: messagebox.showinfo(
                     "转换完成",
-                    f"成功 {success} 个，跳过 {skip} 个。\n"
+                    f"分轨成功 {success} 个，跳过 {skip} 个；直接转换成功 {conv_ok} 个，"
+                    f"失败 {conv_fail} 个。\n"
                     f"已对输出 FLAC 做播放 / 参数 / 无损验证（详见日志）。",
                 ))
             self.after(0, lambda: self.status_label.config(
-                text=f"处理完成：成功 {success} 个，跳过 {skip} 个"
+                text=f"处理完成：分轨 {success} 个（跳过 {skip}），直转 {conv_ok} 个"
             ))
         except Exception as e:  # noqa: BLE001
             self.log(f"转换出错：{e}\n")
             self.after(0, lambda: messagebox.showerror("转换出错", str(e)))
             self.after(0, lambda: self.status_label.config(text="转换出错，详见日志"))
         finally:
-            if self.batch_cue_paths:
+            if self.batch_cue_paths or self.batch_audio_paths:
                 self.after(0, lambda: self.btn_convert.config(state="normal"))
 
     # ----------------------------------------------------- 清空
@@ -549,7 +628,9 @@ class App(tk.Tk):
         for row in self.tree.get_children():
             self.tree.delete(row)
         self.batch_cue_paths = []
+        self.batch_audio_paths = []
         self._cue_map.clear()
+        self._audio_map.clear()
         self.btn_convert.config(state="disabled")
         self.btn_delete.config(state="disabled")
         self.status_label.config(text="等待拖入或选择…")
@@ -557,31 +638,42 @@ class App(tk.Tk):
 
     # ----------------------------------------------------- 逐项删减
     def _resolve_cue_iid(self, iid: str) -> Optional[str]:
-        """把任意选中的行解析为其所属的 CUE 顶层行 iid（曲目子行归并到父 CUE）。"""
+        """把任意选中的行解析为其所属的顶层行 iid（曲目子行归并到父 CUE）。"""
         if not iid or not self.tree.exists(iid):
             return None
         parent = self.tree.parent(iid)
         return parent if parent else iid
 
-    def _remove_cue(self, cue_iid: str) -> None:
-        """从结果列表与待处理列表中移除一个 CUE 条目（含其全部曲目子行）。"""
-        if not cue_iid or not self.tree.exists(cue_iid):
+    def _remove_item(self, top_iid: str) -> None:
+        """从结果列表与待处理列表中移除一个顶层条目（CUE 或直转音频）。"""
+        if not top_iid or not self.tree.exists(top_iid):
             return
-        path = self._cue_map.pop(cue_iid, None)
-        for child in self.tree.get_children(cue_iid):
+
+        path = self._cue_map.pop(top_iid, None)
+        audio = self._audio_map.pop(top_iid, None)
+        for child in self.tree.get_children(top_iid):
             self.tree.delete(child)
-        self.tree.delete(cue_iid)
+        self.tree.delete(top_iid)
+
         if path and path in self.batch_cue_paths:
             self.batch_cue_paths.remove(path)
-        if not self.batch_cue_paths:
+        if audio and audio in self.batch_audio_paths:
+            self.batch_audio_paths.remove(audio)
+
+        if not self.batch_cue_paths and not self.batch_audio_paths:
             self.btn_convert.config(state="disabled")
         self.btn_delete.config(
             state="normal" if self.tree.selection() else "disabled"
         )
-        self.status_label.config(
-            text=f"已移除 1 个条目，剩余 {len(self.batch_cue_paths)} 个待处理"
+        remaining = len(self.batch_cue_paths) + len(self.batch_audio_paths)
+        self.status_label.config(text=f"已移除 1 个条目，剩余 {remaining} 个待处理")
+        self.log(
+            f"已移除条目：{os.path.basename(path or audio or top_iid)}\n"
         )
-        self.log(f"已移除条目：{os.path.basename(path) if path else cue_iid}\n")
+
+    def _remove_cue(self, cue_iid: str) -> None:
+        """兼容旧接口：移除一个 CUE 条目（含其全部曲目子行）。"""
+        self._remove_item(cue_iid)
 
     def _delete_selected(self, event=None) -> None:
         """删除当前选中的条目（可多选；曲目子行会自动归并到所属 CUE）。"""

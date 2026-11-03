@@ -154,3 +154,68 @@ def test_process_cues_explicit_list(fake_tree, monkeypatch):
     assert result.skip_count == 0
     assert result.processed[0].tracks == 2
 
+
+# --------------------------------------------------------------- 直转文件发现
+
+
+def test_discover_audio_files(fake_tree):
+    """应发现目录下的音频文件，但不含 .cue。"""
+    with open(os.path.join(fake_tree, "loose.flac"), "wb") as f:
+        f.write(b"\x00\x00")
+    with open(os.path.join(fake_tree, "loose.ape"), "wb") as f:
+        f.write(b"\x00\x00")
+    found = batch.discover_audio_files(fake_tree, recursive=True)
+    names = sorted(os.path.basename(p) for p in found)
+    assert names == ["loose.ape", "loose.flac"]
+
+
+def test_discover_audio_files_no_recursive(fake_tree):
+    found = batch.discover_audio_files(fake_tree, recursive=False)
+    assert found == []  # fake_tree 顶层没有音频文件
+
+
+def test_expand_to_inputs_separates_cues_and_audio(fake_tree):
+    """应把 .cue 与音频文件分开返回。"""
+    audio = os.path.join(fake_tree, "loose.wav")
+    with open(audio, "wb") as f:
+        f.write(b"\x00\x00")
+    cues, audios = batch.expand_to_inputs([fake_tree], recursive=True)
+    assert len(cues) == 3
+    assert [os.path.basename(a) for a in audios] == ["loose.wav"]
+
+
+def test_expand_to_inputs_excludes_cue_referenced_master(fake_tree):
+    """被 CUE 引用的母带不应再进入直转列表（否则会重复输出）。"""
+    master = os.path.join(fake_tree, "master.flac")
+    with open(master, "wb") as f:
+        f.write(b"\x00\x00")
+    cue = """FILE "master.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "One"
+    INDEX 01 00:00:00
+"""
+    cue_path = os.path.join(fake_tree, "with_master.cue")
+    with open(cue_path, "w", encoding="utf-8") as f:
+        f.write(cue)
+
+    cues, audios = batch.expand_to_inputs([fake_tree], recursive=True)
+    basenames = [os.path.basename(a) for a in audios]
+    assert "master.flac" not in basenames, "被 CUE 引用的母带被重复纳入了直转列表"
+
+
+def test_expand_to_inputs_explicit_audio_file(fake_tree):
+    """直接给定的音频文件（未被 CUE 引用）应进入直转列表。"""
+    audio = os.path.join(fake_tree, "direct.ape")
+    with open(audio, "wb") as f:
+        f.write(b"\x00\x00")
+    cues, audios = batch.expand_to_inputs([audio], recursive=True)
+    assert cues == []
+    assert len(audios) == 1
+    assert os.path.basename(audios[0]) == "direct.ape"
+
+
+def test_expand_to_inputs_empty():
+    cues, audios = batch.expand_to_inputs([])
+    assert cues == []
+    assert audios == []
+

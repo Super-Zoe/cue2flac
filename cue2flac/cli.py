@@ -9,7 +9,8 @@ from typing import List, Optional
 
 from .cue_parser import parse_cue
 from .splitter import split, SplitterError
-from .batch import process_directory, BatchResult
+from .batch import process_directory, process_all, BatchResult
+from .convert import SUPPORTED_EXTS, format_convert_summary
 from . import __version__
 
 
@@ -56,12 +57,22 @@ def _show_gui_message(kind: str, title: str, message: str) -> None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="cue2flac",
-        description="根据 CUE 分轨文件，把整轨无损音频（FLAC/WAV/APE/...）拆分为多首独立 FLAC。",
+        description=(
+            "根据 CUE 分轨文件，把整轨无损音频（FLAC/WAV/APE/...）拆分为多首独立 FLAC；"
+            "也可不使用 CUE，直接把整轨无损音频转换为 FLAC。"
+        ),
     )
     p.add_argument(
         "cue",
-        nargs="?",
-        help="CUE 文件路径；也可传入【目录】，自动批量扫描其中的 .cue 文件",
+        nargs="*",
+        help=(
+            "CUE 文件路径；也可传入【目录】，自动批量扫描其中的 .cue 文件。"
+            "还可直接传入无损音频文件（"
+            + "、".join(SUPPORTED_EXTS[:6])
+            + "、"
+            + "、".join(SUPPORTED_EXTS[-2:])
+            + " 等），不经 CUE 直接转换为 FLAC；可同时给出多个路径。"
+        ),
     )
     p.add_argument(
         "-o", "--out",
@@ -105,19 +116,30 @@ def main(argv: Optional[List[str]] = None) -> int:
         except Exception:  # noqa: BLE001
             args.out = None
 
-    # 批量模式：位置参数或 --dir 指向目录时，扫描该目录下的全部 .cue
-    batch_root = args.dir or (args.cue if args.cue and os.path.isdir(args.cue) else None)
+    # 批量模式：--dir 指向目录，或位置参数里含目录
+    inputs = list(args.cue or [])
+    batch_root = args.dir or next((p for p in inputs if os.path.isdir(p)), None)
     if batch_root:
         return _run_batch(batch_root, args, log_path)
 
-    if not args.cue:
+    if not inputs:
         parser.print_help()
         return 2
 
+    # 单个 CUE → 原有分轨流程（保持向后兼容）
+    if len(inputs) == 1 and inputs[0].lower().endswith(".cue"):
+        return _run_single_cue(inputs[0], args, log_path)
+
+    # 其余情况：混合处理（多个 CUE / 音频文件 / 两者混合）
+    return _run_mixed(inputs, args, log_path)
+
+
+def _run_single_cue(cue: str, args, log_path: Optional[str]) -> int:
+    """处理单个 CUE 文件（原有行为）。"""
     try:
-        sheet = parse_cue(args.cue, audio_hint=args.audio)
+        sheet = parse_cue(cue, audio_hint=args.audio)
         out_dir = args.out or os.path.join(
-            os.path.dirname(os.path.abspath(args.cue)),
+            os.path.dirname(os.path.abspath(cue)),
             sheet.album_title or "output",
         )
         print(f"解析 CUE：专辑《{sheet.album_title or '未命名'}》，共 {sheet.total_tracks} 首")
@@ -147,12 +169,58 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
 
+def _run_mixed(inputs: List[str], args, log_path: Optional[str]) -> int:
+    """混合处理：多个 CUE（分轨）与音频文件（直转）可在一次调用中完成。"""
+    try:
+        result, convert_results = process_all(
+            inputs,
+            recursive=not args.no_recursive,
+            out=args.out,
+            audio_hint=args.audio,
+            copy_cover=not args.no_cover,
+            verify=args.verify,
+            on_progress=lambda m: print(m, end=""),
+        )
+    except (FileNotFoundError, ValueError) as e:
+        print(f"错误：{e}", file=sys.stderr)
+        if log_path:
+            _show_gui_message("error", "cue2flac 出错", str(e))
+        return 1
+    except Exception as e:  # noqa: BLE001
+        print(f"未预期错误：{e}", file=sys.stderr)
+        if log_path:
+            _show_gui_message("error", "cue2flac 出错", str(e))
+        return 1
+
+    print()
+    cue_ok = result.success_count
+    cue_skip = result.skip_count
+    conv_ok = sum(1 for r in convert_results if r.ok)
+    conv_fail = sum(1 for r in convert_results if not r.ok)
+
+    if cue_ok == 0 and conv_ok == 0:
+        msg = "未成功处理任何文件，请检查日志中的跳过原因。"
+        print(msg)
+        if log_path:
+            _show_gui_message("error", "cue2flac", msg)
+        return 1
+
+    msg = (
+        f"处理完成：分轨成功 {cue_ok} 个（跳过 {cue_skip} 个），"
+        f"直接转换成功 {conv_ok} 个（失败 {conv_fail} 个）。"
+    )
+    print(msg)
+    if log_path:
+        _show_gui_message("info", "cue2flac 完成", msg)
+    return 0
+
+
 def _run_batch(root: str, args, log_path: Optional[str]) -> int:
-    """批量扫描目录并处理其中的全部 CUE。"""
+    """批量扫描目录：处理其中的全部 CUE，并对未被 CUE 引用的音频做直接转换。"""
     recursive = args.recursive and not args.no_recursive
     try:
-        result: BatchResult = process_directory(
-            root,
+        result, convert_results = process_all(
+            [root],
             recursive=recursive,
             out=args.out,
             audio_hint=args.audio,
@@ -172,20 +240,24 @@ def _run_batch(root: str, args, log_path: Optional[str]) -> int:
         return 1
 
     print()
-    if result.scanned == 0:
-        msg = f"在 {root} 下未发现任何 .cue 文件。"
+    conv_ok = sum(1 for r in convert_results if r.ok)
+    if result.scanned == 0 and not convert_results:
+        msg = f"在 {root} 下未发现任何 .cue 文件或可转换的音频文件。"
         print(msg)
         if log_path:
             _show_gui_message("error", "cue2flac 批量", msg)
         return 1
-    if result.success_count == 0:
-        msg = "未发现可成功处理的 CUE 文件，请检查日志中的跳过原因。"
+    if result.success_count == 0 and conv_ok == 0:
+        msg = "未发现可成功处理的文件，请检查日志中的跳过原因。"
         print(msg)
         if log_path:
             _show_gui_message("error", "cue2flac 批量", msg)
         return 1
 
-    msg = f"批量处理完成：成功 {result.success_count} 个，跳过 {result.skip_count} 个。"
+    msg = (
+        f"批量处理完成：分轨成功 {result.success_count} 个（跳过 {result.skip_count} 个），"
+        f"直接转换成功 {conv_ok} 个。"
+    )
     print(msg)
     if log_path:
         _show_gui_message("info", "cue2flac 批量完成", msg)

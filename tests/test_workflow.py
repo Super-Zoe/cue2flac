@@ -98,6 +98,32 @@ def test_smoke_test_covers_multiple_formats():
     assert "Escape($audioFile)" in runs, "冒烟测试缺少源码解析一致性断言"
 
 
+def test_direct_convert_smoke_covers_bit_depth_and_lossless():
+    """直转冒烟必须校验位深保持与 PCM 无损（这是「无损」承诺的硬证据）。"""
+    data = _load()
+    runs = "\n".join(
+        str(step.get("run", ""))
+        for job in data["jobs"].values()
+        for step in job.get("steps", [])
+    )
+    # 必须有独立的直转冒烟步骤
+    assert "直接转换汇总" in runs, "缺少不依赖 CUE 的直转冒烟测试"
+    # 位深保持断言（24bit 源不能被静默降为 16bit）
+    assert "bits_per_raw_sample" in runs, "直转冒烟未校验位深"
+    assert "pcm_s24le" in runs, "直转冒烟未覆盖 24bit 源"
+    assert "48000" in runs, "直转冒烟未覆盖非 44.1kHz 采样率"
+    # 无损实证：源与输出的 s32le PCM 求 MD5 比对
+    assert "pcm_s32le" in runs, "直转冒烟未做 PCM MD5 无损比对"
+    assert "Get-FileHash" in runs, "直转冒烟未计算 MD5"
+    # 打包时必须包含新模块，否则 exe 运行时找不到 cue2flac.convert
+    build_steps = "\n".join(
+        str(step.get("run", ""))
+        for job in data["jobs"].values()
+        for step in job.get("steps", [])
+    )
+    assert "cue2flac.convert" in build_steps, "打包未包含 cue2flac.convert 模块"
+
+
 CHECKER = r"""
 $bad = 0
 foreach ($f in $args) {

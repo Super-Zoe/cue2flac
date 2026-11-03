@@ -129,7 +129,12 @@ def _match_score(want: str, cand_stem: str) -> float:
 
 
 def _fuzzy_find_audio(fname: str, cue_dir: str) -> Optional[str]:
-    """在 CUE 所在目录中模糊查找最匹配的音频文件，找不到返回 None。"""
+    """在 CUE 所在目录中模糊查找最匹配的音频文件，找不到返回 None。
+
+    始终按相似度择优（不因「目录里只有一个音频文件」就无条件采用）——
+    否则当 CUE 引用的文件确实缺失、而目录里恰好有另一个无关音频时，
+    会把无关文件误当作母带，导致分轨内容完全错误。
+    """
     want_base = os.path.splitext(os.path.basename(fname))[0]
     want_ext = os.path.splitext(fname)[1].lower()
     try:
@@ -144,10 +149,6 @@ def _fuzzy_find_audio(fname: str, cue_dir: str) -> Optional[str]:
     ]
     if not cands:
         return None
-
-    # 目录里只有一个音频文件时直接采用（最常见的单专辑目录情形）
-    if len(cands) == 1:
-        return os.path.abspath(os.path.join(cue_dir, cands[0]))
 
     best: Optional[str] = None
     best_score = 0.0

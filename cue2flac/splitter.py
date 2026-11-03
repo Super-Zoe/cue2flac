@@ -57,7 +57,13 @@ def _is_dsd(audio_path: str, ffprobe: str) -> bool:
 
 
 def _detect_sample_fmt(audio_path: str, ffprobe: str) -> str:
-    """探测源文件位深，返回 ffmpeg 的 -sample_fmt 取值（未知则返回空串）。"""
+    """探测源文件位深，返回 ffmpeg 的 -sample_fmt 取值（未知则返回空串）。
+
+    注意：FLAC 编码器只接受 ``s16`` 与 ``s32`` 两种采样格式，因此 24bit 源必须
+    映射为 ``s32``（容器用 32 位承载 24 位有效数据，FLAC 会把
+    ``bits_per_raw_sample`` 记为 24，音频数据依然逐样本无损）。
+    若误传 ``s24``，ffmpeg 会直接报 "Invalid sample format 's24'" 而转换失败。
+    """
     try:
         out = subprocess.run(
             [
@@ -67,7 +73,7 @@ def _detect_sample_fmt(audio_path: str, ffprobe: str) -> str:
                 "-select_streams",
                 "a:0",
                 "-show_entries",
-                "stream=bits_per_raw_sample",
+                "stream=bits_per_raw_sample,bits_per_sample",
                 "-of",
                 "default=nw=1:nk=1",
                 audio_path,
@@ -81,7 +87,8 @@ def _detect_sample_fmt(audio_path: str, ffprobe: str) -> str:
             if line.isdigit():
                 bits = int(line)
                 if bits in (8, 16, 24, 32):
-                    return f"s{bits}"
+                    # FLAC 编码器仅支持 s16 / s32：24bit 用 s32 承载
+                    return "s16" if bits <= 16 else "s32"
     except Exception:
         pass
     return ""

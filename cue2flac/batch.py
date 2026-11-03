@@ -11,10 +11,15 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 from .cue_parser import parse_cue
 from .splitter import split
+from .convert import (
+    SUPPORTED_EXTS,
+    convert_files,
+    format_convert_summary,
+)
 
 
 @dataclass
@@ -110,6 +115,72 @@ def expand_to_cues(paths: List[str], recursive: bool = True) -> List[str]:
                     cues.append(f)
     cues.sort(key=lambda x: x.lower())
     return cues
+
+
+def discover_audio_files(root: str, recursive: bool = True) -> List[str]:
+    """扫描 root 下所有受支持的音频文件（不含 .cue），返回排序后的绝对路径。"""
+    if not os.path.isdir(root):
+        raise FileNotFoundError(f"目录不存在或不是目录：{root}")
+
+    found: List[str] = []
+    seen: set[str] = set()
+    for dirpath, dirnames, filenames in os.walk(root):
+        for fn in filenames:
+            if os.path.splitext(fn)[1].lower() in SUPPORTED_EXTS:
+                full = os.path.abspath(os.path.join(dirpath, fn))
+                if full not in seen:
+                    seen.add(full)
+                    found.append(full)
+        if not recursive:
+            dirnames[:] = []
+
+    found.sort(key=lambda p: p.lower())
+    return found
+
+
+def expand_to_inputs(
+    paths: List[str],
+    recursive: bool = True,
+) -> Tuple[List[str], List[str]]:
+    """把一组拖入的路径展开为 (cue 列表, 待直转音频列表)。
+
+    直转列表只包含**没有被任何 CUE 引用**的音频文件——否则同一张专辑的整轨母带
+    会既被 CUE 分轨、又被单独转一次，造成重复输出。
+    """
+    cues = expand_to_cues(paths, recursive=recursive)
+
+    # 收集被 CUE 引用的音源（按解析后的绝对路径）
+    referenced: set[str] = set()
+    for cue in cues:
+        try:
+            sheet = parse_cue(cue)
+        except Exception:  # noqa: BLE001
+            continue
+        for tr in sheet.tracks:
+            if tr.file:
+                referenced.add(os.path.abspath(tr.file))
+
+    audios: List[str] = []
+    seen: set[str] = set()
+    for p in paths:
+        if os.path.isfile(p):
+            ext = os.path.splitext(p)[1].lower()
+            if ext in SUPPORTED_EXTS:
+                ap = os.path.abspath(p)
+                if ap not in referenced and ap not in seen:
+                    seen.add(ap)
+                    audios.append(ap)
+        elif os.path.isdir(p):
+            try:
+                found = discover_audio_files(p, recursive=recursive)
+            except Exception:  # noqa: BLE001
+                found = []
+            for f in found:
+                if f not in referenced and f not in seen:
+                    seen.add(f)
+                    audios.append(f)
+    audios.sort(key=lambda x: x.lower())
+    return cues, audios
 
 
 def _sanitize(name: str) -> str:
@@ -249,6 +320,59 @@ def process_directory(
         verify=verify,
         on_progress=on_progress,
     )
+
+
+def process_all(
+    paths: List[str],
+    recursive: bool = True,
+    out: Optional[str] = None,
+    audio_hint: Optional[str] = None,
+    copy_cover: bool = True,
+    verify: bool = False,
+    on_progress: Optional[Callable[[str], None]] = None,
+) -> Tuple[BatchResult, List]:
+    """混合处理：一次调用里既做 CUE 分轨，也做不依赖 CUE 的音频直转。
+
+    拖入的路径会被展开为两类任务：
+    - ``.cue`` 文件      → 按 CUE 分轨成多首 FLAC；
+    - 其它音频文件      → 整轨直接转成一个 FLAC。
+
+    返回 (分轨结果, 直转结果列表)。
+    """
+    cues, audios = expand_to_inputs(paths, recursive=recursive)
+
+    # 只有确实存在 CUE 时才进入分轨流程——否则 process_cues 会打印
+    # 「未发现任何 .cue 文件，无需处理。」这种噪音提示，
+    # 在「纯直转」场景下会让人误以为出错了。
+    if cues:
+        result = process_cues(
+            cues,
+            out=out,
+            audio_hint=audio_hint,
+            copy_cover=copy_cover,
+            verify=verify,
+            on_progress=on_progress,
+        )
+    else:
+        result = BatchResult()
+
+    convert_results = []
+    if audios:
+        if on_progress:
+            on_progress(
+                f"\n=== 不依赖 CUE 的直接转换：{len(audios)} 个音频文件 ===\n"
+            )
+        convert_results = convert_files(
+            audios,
+            out_dir=out,
+            copy_cover=copy_cover,
+            verify=verify,
+            on_progress=on_progress,
+        )
+        if on_progress:
+            on_progress("\n" + format_convert_summary(convert_results) + "\n")
+
+    return result, convert_results
 
 
 def format_summary(result: BatchResult) -> str:

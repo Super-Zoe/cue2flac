@@ -54,12 +54,20 @@ class VerificationReport:
 
 
 def probe_audio(path: str, ffprobe: str) -> Optional[Dict]:
-    """用 ffprobe 读取音频流参数；失败返回 None。"""
+    """用 ffprobe 读取音频流参数；失败返回 None。
+
+    位深同时读取 ``bits_per_raw_sample`` 与 ``bits_per_sample``：
+    - WAV 的 pcm_s16le 只有 ``bits_per_sample=16``，``bits_per_raw_sample`` 为 N/A；
+    - FLAC / APE 则由 ``bits_per_raw_sample`` 给出真实位深。
+    只读其中一个会导致位深探测漏判（例如把 16bit WAV 误判为未知）。
+    """
     try:
         out = subprocess.run(
             [
                 ffprobe, "-v", "error",
-                "-show_entries", "stream=sample_rate,bits_per_raw_sample,channels,codec_name,duration",
+                "-show_entries",
+                "stream=sample_rate,bits_per_raw_sample,bits_per_sample,"
+                "channels,codec_name,duration",
                 "-of", "json", path,
             ],
             capture_output=True, text=True, timeout=60,
@@ -82,9 +90,12 @@ def probe_audio(path: str, ffprobe: str) -> Optional[Dict]:
             except Exception:  # noqa: BLE001
                 return default
 
+        raw_bits = _int(s.get("bits_per_raw_sample"))
+        sample_bits = _int(s.get("bits_per_sample"))
+        bits = raw_bits or sample_bits
         return {
             "sample_rate": _int(s.get("sample_rate")),
-            "bits": _int(s.get("bits_per_raw_sample")),
+            "bits": bits,
             "channels": _int(s.get("channels")),
             "codec": s.get("codec_name", ""),
             "duration": float(s.get("duration") or 0),
@@ -178,6 +189,74 @@ def verify_track(
             res.errors.append("PCM 与源区段不一致（可能存在截断或数据损坏）")
     else:
         res.errors.append("无法对源 / 输出做 PCM 比对（跳过无损校验）")
+
+    return res
+
+
+def verify_whole_file(
+    src_audio: str,
+    out_path: str,
+    ff: str,
+    ffprobe: str,
+    on_progress=None,
+) -> TrackVerifyResult:
+    """校验「整轨文件 → FLAC」的直接转换结果。
+
+    与 ``verify_track`` 的区别：这里比对的是**整个文件**而非某个时间区段，
+    适用于不依赖 CUE 的直接转换场景。
+
+    DSD 源（1-bit 编码）无法与 PCM 逐样本比对（转 PCM 本身不可逆），
+    因此对 DSD 只校验可播放性与声道数，跳过 MD5 无损比对。
+    """
+    res = TrackVerifyResult(out_path=out_path, track_no=1)
+
+    src = probe_audio(src_audio, ffprobe)
+    out = probe_audio(out_path, ffprobe)
+    if src:
+        res.src_params = src
+    if out:
+        res.out_params = out
+
+    # 1) 可播放性
+    ok, err = decode_ok(out_path, ff)
+    res.playable = ok
+    if not ok:
+        res.errors.append("文件无法解码（可能已损坏）：" + str(err)[:300])
+
+    is_dsd = bool(src) and str(src.get("codec", "")).lower().startswith("dsd")
+
+    # 2) 参数匹配
+    if src and out:
+        mism: List[str] = []
+        if not is_dsd and out["sample_rate"] and out["sample_rate"] != src["sample_rate"]:
+            mism.append(f"采样率 {out['sample_rate']}≠源 {src['sample_rate']}")
+        if out["channels"] and out["channels"] != src["channels"]:
+            mism.append(f"声道数 {out['channels']}≠源 {src['channels']}")
+        if not is_dsd and src["bits"] and out["bits"] and out["bits"] != src["bits"]:
+            mism.append(f"位深 {out['bits']}≠源 {src['bits']}")
+        if mism:
+            res.errors.append("音频参数不一致：" + "; ".join(mism))
+        else:
+            res.params_match = True
+    elif out:
+        res.params_match = True
+
+    # 3) 无损 + 无截断（整文件 PCM 逐字节一致）
+    if is_dsd:
+        # DSD→PCM 不可逆，无法做逐样本比对；仅以「可播放 + 参数匹配」作为通过依据
+        res.lossless = False
+        res.no_truncation = True
+    else:
+        src_md5 = pcm_md5(src_audio, ff, 0.0, None)
+        out_md5 = pcm_md5(out_path, ff, 0.0, None)
+        if src_md5 and out_md5:
+            if src_md5 == out_md5:
+                res.lossless = True
+                res.no_truncation = True
+            else:
+                res.errors.append("PCM 与源文件不一致（可能存在截断或数据损坏）")
+        else:
+            res.errors.append("无法对源 / 输出做 PCM 比对（跳过无损校验）")
 
     return res
 

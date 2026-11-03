@@ -61,6 +61,7 @@ jobs:
             --hidden-import cue2flac.cue_parser `
             --hidden-import cue2flac.splitter `
             --hidden-import cue2flac.batch `
+            --hidden-import cue2flac.convert `
             --hidden-import cue2flac.config `
             --hidden-import cue2flac.verify `
             --hidden-import cue2flac.layout `
@@ -197,6 +198,66 @@ jobs:
           }
 
           Write-Host "multi-format smoke OK（wav/flac 等可编码格式已真实分轨；ape/dsf/dff 已验证解码器可用）"
+
+      - name: "Smoke test (direct convert without CUE)"
+        shell: pwsh
+        run: |
+          # 不依赖 CUE 的直接转换：整轨音频 → FLAC
+          # 关键断言：
+          #  ① 位深必须保持（24bit 源转 FLAC 后仍是 24bit，而非被静默降为 16bit）；
+          #  ② 采样率 / 声道数必须与源一致；
+          #  ③ PCM 逐字节一致（源与输出各自解码为 s32le 后求 MD5）→ 实证无损。
+
+          function Convert-And-Check($src, $label, $expectRate, $expectBits) {
+            $out = "conv_$label"
+            $runOut = ./dist/cue2flac.exe $src -o $out --no-cover --verify 2>&1 | Out-String
+            Write-Host $runOut
+            if ($runOut -notmatch '直接转换汇总') {
+              Write-Error "${label}: 未进入直接转换流程"
+              exit 1
+            }
+            $flac = Get-ChildItem $out -Filter *.flac -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $flac) {
+              Write-Error "${label}: 未生成 FLAC"
+              exit 1
+            }
+            $info = ./ffprobe.exe -v error -select_streams a:0 `
+              -show_entries stream=sample_rate,channels,bits_per_raw_sample `
+              -of default=nw=1 $flac.FullName | Out-String
+            Write-Host $info
+            if ($info -notmatch "sample_rate=$expectRate") {
+              Write-Error "${label}: 采样率不匹配，期望 $expectRate"
+              exit 1
+            }
+            if ($info -notmatch "bits_per_raw_sample=$expectBits") {
+              Write-Error "${label}: 位深不匹配，期望 $expectBits"
+              exit 1
+            }
+            # 无损实证：源与输出各自解码为 s32le 裸 PCM，求 MD5 必须一致
+            ./ffmpeg.exe -v error -i $src -f s32le -c:a pcm_s32le -y "$env:TEMP\src.pcm" 2>$null
+            ./ffmpeg.exe -v error -i $flac.FullName -f s32le -c:a pcm_s32le -y "$env:TEMP\out.pcm" 2>$null
+            $m1 = (Get-FileHash "$env:TEMP\src.pcm" -Algorithm MD5).Hash
+            $m2 = (Get-FileHash "$env:TEMP\out.pcm" -Algorithm MD5).Hash
+            if ($m1 -ne $m2) {
+              Write-Error "${label}: PCM MD5 不一致（$m1 vs $m2），转换不是无损的"
+              exit 1
+            }
+            Write-Host "direct convert OK: $label (rate=$expectRate bits=$expectBits lossless)"
+          }
+
+          # 16bit WAV
+          ./ffmpeg.exe -f lavfi -i anullsrc=r=44100:cl=stereo -t 3 -y conv16.wav 2>$null
+          Convert-And-Check "conv16.wav" "wav16" 44100 16
+
+          # 24bit WAV（位深保持是重点）
+          ./ffmpeg.exe -f lavfi -i anullsrc=r=48000:cl=stereo -t 3 -c:a pcm_s24le -y conv24.wav 2>$null
+          Convert-And-Check "conv24.wav" "wav24" 48000 24
+
+          # FLAC 源（流拷贝路径）
+          ./ffmpeg.exe -y -i conv16.wav conv.flac 2>$null
+          Convert-And-Check "conv.flac" "flac" 44100 16
+
+          Write-Host "Direct-convert smoke OK"
 
       - name: Batch smoke test (scan directory, skip broken)
         shell: pwsh

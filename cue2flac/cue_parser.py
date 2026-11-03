@@ -92,7 +92,7 @@ def _resolve_audio(fname: str, cue_dir: str, hint: Optional[str]) -> str:
     candidates.append(os.path.join(cue_dir, fname))
     candidates.append(fname)
     base, _ext = os.path.splitext(fname)
-    for ext in (".flac", ".wav", ".wv", ".ape", ".tta", ".tak", ".m4a", ""):
+    for ext in (".flac", ".wav", ".wv", ".ape", ".tta", ".tak", ".m4a", ".dsf", ".dff", ""):
         candidates.append(os.path.join(cue_dir, base + ext))
     for c in candidates:
         if c and os.path.isfile(c):

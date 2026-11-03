@@ -21,6 +21,41 @@ class SplitterError(RuntimeError):
     """分轨过程中的可预期错误。"""
 
 
+# DSD（1-bit 德尔塔-西格玛）源码：转成 PCM/FLAC 属于高质量转换，而非逐样本无损
+_DSD_EXTS = (".dsf", ".dff")
+_DSD_CODECS = (
+    "dsd", "dsd_lsbf", "dsd_msbf", "dsd_lsbf_planar", "dsd_msbf_planar",
+)
+
+
+def _is_dsd(audio_path: str, ffprobe: str) -> bool:
+    """判断音源是否为 DSD（.dsf/.dff 容器，或 ffprobe 解码器为 dsd*）。
+
+    DSD 为 1-bit 编码，无法逐样本无损映射为 PCM/FLAC；此函数仅用于
+    在转换时给出明确提示，并避免把 DSD 的“1 bit”误当成 PCM 位深。
+    """
+    low = (audio_path or "").lower()
+    if low.endswith(_DSD_EXTS):
+        return True
+    try:
+        out = subprocess.run(
+            [
+                ffprobe, "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=codec_name",
+                "-of", "default=nw=1:nk=1",
+                audio_path,
+            ],
+            capture_output=True, text=True, timeout=30,
+        ).stdout
+        for line in out.splitlines():
+            if line.strip().lower() in _DSD_CODECS:
+                return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
 def _detect_sample_fmt(audio_path: str, ffprobe: str) -> str:
     """探测源文件位深，返回 ffmpeg 的 -sample_fmt 取值（未知则返回空串）。"""
     try:
@@ -96,6 +131,17 @@ def split(
     total = sheet.total_tracks
     results: List[str] = []
 
+    # DSD 源码检测：用于提示 + 跳过 PCM 位深参数
+    is_dsd = bool(sheet.tracks) and _is_dsd(sheet.tracks[0].file, ffprobe)
+    if is_dsd:
+        # DSD 为 1-bit 编码，其“位深”不能当作 PCM 位深；交给 ffmpeg 默认输出 32-bit PCM
+        sample_fmt = ""
+        if on_progress:
+            on_progress(
+                "注意：检测到 DSD 源码（.dsf/.dff）。DSD 是 1-bit 编码，转 FLAC（PCM）"
+                "属于高质量转换，并非逐样本无损；输出采用 ffmpeg 默认的 32-bit PCM。\n"
+            )
+
     if on_progress:
         on_progress(f"开始分轨：共 {total} 首，输出到 {out_dir}\n")
 
@@ -105,7 +151,7 @@ def split(
                 f"音轨 {tr.number} 的音频文件不存在或未找到：{tr.file}\n"
                 f"请用 --audio 指定正确的整轨音频文件。"
             )
-        if not sample_fmt:
+        if not sample_fmt and not is_dsd:
             sample_fmt = _detect_sample_fmt(tr.file, ffprobe)
 
         out_name = _safe_name(tr, total) + ".flac"

@@ -1,6 +1,6 @@
 # cue2flac
 
-> 根据 CUE 分轨文件，把整轨无损音频（FLAC / WAV / APE / WavPack / TTA / TAK / M4A / …）拆分为多首独立 FLAC 曲目。
+> 根据 CUE 分轨文件，把整轨无损音频（FLAC / WAV / APE / DSD(.dsf/.dff) / WavPack / TTA / TAK / M4A / …）按曲目拆分为多首独立 FLAC 曲目。
 > 便携、跨平台，可打包为**双击即用的单文件 exe（已内嵌 ffmpeg/ffprobe，无需安装任何环境）**。
 
 ---
@@ -27,7 +27,9 @@
 ## 特性
 
 - **无损分轨**：整轨音频解码为 PCM → 按 CUE 的 `INDEX 01` / 下一条 `INDEX 01` 切出区段 → FLAC 编码器重新封装。只要不改变采样率与位深，输出 PCM 与源对应区段**逐样本一致**（可用 `--verify` 校验）。
-- **多格式输入**：凡 ffmpeg 支持的整轨音频均可，包括但不限于 FLAC、WAV、APE、WavPack（.wv）、TTA、TAK、M4A。
+- **多格式输入**：凡 ffmpeg 支持的整轨音频均可，包括但不限于 FLAC、WAV、APE、**DSD（.dsf / .dff）**、WavPack（.wv）、TTA、TAK、M4A。
+  - **PCM 源码（FLAC / WAV / APE / WavPack / TTA / TAK / M4A）**：解码 → 切段 → FLAC 重新封装，输出 PCM 与源区段**逐样本一致**，是真正的无损分轨（可用 `--verify` 校验）。
+  - **DSD 源码（.dsf / .dff）**：DSD 是 1-bit 德尔塔-西格玛编码，无法逐样本映射为 PCM/FLAC，因此 DSD → FLAC 属于**高质量转换而非逐样本无损**；程序会采用 ffmpeg 默认的 32-bit PCM 输出，并在日志中明确提示。输出文件可正常播放，但与原始 DSD 比特流不存在「逐字节一致」关系。
 - **CUE 兼容**：自动识别 `INDEX 00/01`、`PERFORMER` / `TITLE`（专辑级与曲目级）、`REM GENRE/DATE/COMMENT`、`FILE` 指向；支持 GBK / UTF-8(-SIG) / Shift-JIS / CP1252 / Latin-1 多种编码自动探测。
 - **元数据保留**：专辑名、曲目名、表演者、流派、年份、曲目序号（`NN/总数`）写入每个 FLAC；源文件内嵌的封面会自动复制（可用 `--no-cover` 关闭）。
 - **两种用法**：图形界面（双击即用，单一拖放区）与命令行（适合批量 / 脚本）。
@@ -44,6 +46,8 @@
 ```
 
 FLAC 是无损压缩，对 PCM 做有损重编码在技术上不可能；因此“解码整轨 → 用 FLAC 编码重新封装”得到的 PCM 与直接从源文件取对应区段完全一致。`--verify` 会对“源对应区段”与“输出文件”各自解码为 `s32le` 裸 PCM 求 MD5，确保分轨结果逐字节无损、无截断。
+
+> **DSD 例外**：当源为 `.dsf` / `.dff`（1-bit DSD）时，上述链路是「DSD → 32-bit PCM → FLAC」。DSD→PCM 这一步本身不可逆、非逐样本无损，故 DSD 源的 `--verify` 仅能证明「切分过程未额外丢损」，不能证明与原始 DSD 比特流逐字节一致。这是格式本质差异，并非程序缺陷。
 
 ---
 

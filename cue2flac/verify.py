@@ -155,8 +155,10 @@ def verify_track(
             mism.append(f"采样率 {out['sample_rate']}≠源 {src['sample_rate']}")
         if out["channels"] and out["channels"] != src["channels"]:
             mism.append(f"声道数 {out['channels']}≠源 {src['channels']}")
-        if src["bits"] and out["bits"] and out["bits"] != src["bits"]:
-            mism.append(f"位深 {out['bits']}≠源 {src['bits']}")
+        # DSD 源码为 1-bit 编码，其 bits_per_raw_sample 不代表 PCM 位深，跳过位深比对
+        if src.get("codec") != "dsd":
+            if src["bits"] and out["bits"] and out["bits"] != src["bits"]:
+                mism.append(f"位深 {out['bits']}≠源 {src['bits']}")
         if mism:
             res.errors.append("音频参数不一致：" + "; ".join(mism))
         else:

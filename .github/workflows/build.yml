@@ -72,46 +72,64 @@ jobs:
           echo "--- dist ---"
           ls dist
 
-      - name: Smoke test (end-to-end split)
+      - name: Smoke test (multi-format: wav/flac/ape + DSD decoder check)
         shell: pwsh
         run: |
           # 生成 3 秒静音立体声 WAV，作为整轨测试素材
           ./ffmpeg.exe -f lavfi -i anullsrc=r=44100:cl=stereo -t 3 -y test.wav
-          # 写一个最小 CUE，把整轨切成两首
-          @"
-          FILE "test.wav" WAVE
-            TRACK 01 AUDIO
-              TITLE "TestTrack1"
-              PERFORMER "SmokeTest"
-              INDEX 01 00:00:00
-            TRACK 02 AUDIO
-              TITLE "TestTrack2"
-              PERFORMER "SmokeTest"
-              INDEX 01 00:01:50
-          "@ | Set-Content -Encoding ascii test.cue
-          # 用打包好的 exe 执行分轨（控制台 exe，输出直接回显；下面会一并检查产物）
-          $cuePath = (Resolve-Path test.cue).Path
-          ./dist/cue2flac.exe $cuePath -o out --no-cover
-          # 若窗口化 exe 产生了日志，打印出来便于排查
-          $log = Join-Path dist cue2flac_cli.log
-          if (Test-Path $log) { Write-Host "=== cue2flac_cli.log ==="; Get-Content $log }
-          # 校验：必须产出两首非空 FLAC
-          if (-not (Test-Path out)) {
-            Write-Error "输出目录 out 未生成，分轨失败"
-            exit 1
-          }
-          $files = Get-ChildItem out -Filter *.flac
-          if ($files.Count -ne 2) {
-            Write-Error "期望生成 2 个 FLAC，实际 $($files.Count) 个"
-            exit 1
-          }
-          foreach ($f in $files) {
-            if ($f.Length -lt 1000) {
-              Write-Error "FLAC 文件过小：$($f.Name) ($($f.Length) B)"
+          # 由同一母带派生 FLAC 与 APE，验证三种 PCM 源码均可分轨为 FLAC
+          ./ffmpeg.exe -y -i test.wav test.flac
+          ./ffmpeg.exe -y -i test.wav test.ape
+
+          function Split-Cue($audioFile, $label) {
+            @"
+            FILE "$audioFile" WAVE
+              TRACK 01 AUDIO
+                TITLE "TestTrack1"
+                PERFORMER "SmokeTest"
+                INDEX 01 00:00:00
+              TRACK 02 AUDIO
+                TITLE "TestTrack2"
+                PERFORMER "SmokeTest"
+                INDEX 01 00:01:50
+"@ | Set-Content -Encoding ascii test.cue
+            # 用打包好的 exe 执行分轨（控制台 exe，输出直接回显；下面会一并检查产物）
+            $cuePath = (Resolve-Path test.cue).Path
+            ./dist/cue2flac.exe $cuePath -o "out_$label" --no-cover
+            # 若 exe 产生了日志，打印出来便于排查
+            $log = Join-Path dist cue2flac_cli.log
+            if (Test-Path $log) { Write-Host "=== cue2flac_cli.log ==="; Get-Content $log }
+            # 校验：必须产出两首非空 FLAC
+            if (-not (Test-Path "out_$label")) {
+              Write-Error "$label: 输出目录未生成，分轨失败"
               exit 1
             }
+            $files = Get-ChildItem "out_$label" -Recurse -Filter *.flac
+            if ($files.Count -ne 2) {
+              Write-Error "$label: 期望生成 2 个 FLAC，实际 $($files.Count) 个"
+              exit 1
+            }
+            foreach ($f in $files) {
+              if ($f.Length -lt 1000) {
+                Write-Error "$label: FLAC 文件过小：$($f.Name) ($($f.Length) B)"
+                exit 1
+              }
+            }
+            Write-Host "$label smoke OK: 生成 2 个 FLAC"
           }
-          Write-Host "Smoke test OK: 生成 $($files.Count) 个 FLAC"
+
+          Split-Cue "test.wav" "wav"
+          Split-Cue "test.flac" "flac"
+          Split-Cue "test.ape" "ape"
+
+          # DSD 解码器可用性（证明 .dsf/.dff 代码路径有效；CI 内无法合成 DSD 样本，
+          # 但 dsf/dff 与 wav/flac/ape 共用同一套 ffmpeg 解码 → 分轨 管线）
+          $dec = ./ffmpeg.exe -hide_banner -decoders 2>$null | Out-String
+          if ($dec -notmatch '\bdsf\b' -or $dec -notmatch '\bdff\b') {
+            Write-Error "ffmpeg 缺少 dsf/dff 解码器，DSD 输入无法处理"
+            exit 1
+          }
+          Write-Host "DSD decoder check OK: ffmpeg 支持 dsf/dff 解码"
 
       - name: Batch smoke test (scan directory, skip broken)
         shell: pwsh

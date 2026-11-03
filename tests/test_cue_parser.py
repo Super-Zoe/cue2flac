@@ -82,8 +82,31 @@ FILE "音乐.flac" WAVE
         assert sheet.tracks[0].title == "中文曲目"
 
 
+def test_audio_extension_fallback_includes_dsd():
+    """CUE 的 FILE 行若省略扩展名，应能回退到 .dsf / .dff（以及常见 PCM 格式）。"""
+    cue = """TITLE "DSD Album"
+FILE "album" WAVE
+  TRACK 01 AUDIO
+    TITLE "Track One"
+    INDEX 01 00:00:00
+"""
+    for ext in (".dsf", ".dff", ".flac", ".wav", ".ape"):
+        with tempfile.TemporaryDirectory() as d:
+            # 实际存在的音频文件（扩展名回退依赖 os.path.isfile）
+            with open(os.path.join(d, "album" + ext), "wb") as f:
+                f.write(b"\x00\x00")
+            cue_path = os.path.join(d, "album.cue")
+            with open(cue_path, "w", encoding="utf-8") as f:
+                f.write(cue)
+            sheet = parse_cue(cue_path)
+            assert sheet.tracks[0].file.lower().endswith(ext), (
+                f"扩展名回退未命中 {ext}，实际解析为 {sheet.tracks[0].file}"
+            )
+
+
 if __name__ == "__main__":
     test_parse_basic()
     test_timecode_seconds()
     test_gbk_decoding()
+    test_audio_extension_fallback_includes_dsd()
     print("All tests passed.")

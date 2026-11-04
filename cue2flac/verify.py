@@ -176,10 +176,15 @@ def probe_audio(path: str, ffprobe: str,
                 "-of", "json", path,
             ],
             capture_output=True, text=True, timeout=60,
+            # 显式 UTF-8：subprocess 在 text 模式下由后台线程解码，
+            # 若跟随系统区域（中文 Windows 为 cp936）解码含中文标签的
+            # ffprobe JSON 会抛 UnicodeDecodeError，且发生在子线程里、
+            # 主线程 try 抓不到，最终 stdout 变成 None 导致后续 .strip() 崩溃。
+            encoding="utf-8", errors="replace",
         )
     except Exception:  # noqa: BLE001
         return None
-    if out.returncode != 0 or not out.stdout.strip():
+    if out.returncode != 0 or not (out.stdout or "").strip():
         return None
     try:
         data = json.loads(out.stdout)
@@ -219,6 +224,7 @@ def decode_ok(path: str, ff: str) -> Tuple[bool, str]:
         proc = subprocess.run(
             [ff, "-nostdin", "-v", "error", "-i", path, "-f", "null", "-"],
             capture_output=True, text=True, timeout=300,
+            encoding="utf-8", errors="replace",
         )
     except Exception as e:  # noqa: BLE001
         return False, str(e)
@@ -272,6 +278,7 @@ def decoded_stream_info(path: str, ff: str) -> Dict:
             [ff, "-nostdin", "-hide_banner", "-i", path,
              "-map", "0:a:0?", "-f", "null", "-"],
             capture_output=True, text=True, timeout=300,
+            encoding="utf-8", errors="replace",
         )
     except Exception:  # noqa: BLE001
         return {}

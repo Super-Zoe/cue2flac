@@ -165,8 +165,11 @@ def _copy_tags(src: str, dst: str, ff: str, tags: Optional[dict] = None,
                 [probe, "-v", "error", "-show_entries", "format_tags",
                  "-of", "json", src],
                 capture_output=True, text=True, timeout=60,
+                # 显式 UTF-8：同 verify.probe_audio，避免后台解码线程在
+                # 中文 Windows(cp936) 上因含中文标签的 JSON 而崩溃。
+                encoding="utf-8", errors="replace",
             )
-            if meta.returncode != 0:
+            if meta.returncode != 0 or not (meta.stdout or "").strip():
                 _log.debug("ffprobe 读取标签失败（%s），跳过元数据复制", src)
                 return
             tags = (json.loads(meta.stdout).get("format", {}) or {}).get("tags", {})
@@ -189,6 +192,8 @@ def _copy_tags(src: str, dst: str, ff: str, tags: Optional[dict] = None,
                 [ff, "-v", "error", "-y", "-i", dst, "-i", meta_path,
                  "-map_metadata", "1", "-c:a", "copy", "-f", "flac", tmp],
                 capture_output=True, text=True, timeout=600,
+                # 显式 UTF-8：ffmpeg 错误输出可能含中文路径/标签名。
+                encoding="utf-8", errors="replace",
             )
             if cp.returncode != 0:
                 _log.debug(

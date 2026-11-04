@@ -122,7 +122,14 @@ def run_ffmpeg(
     """
     if on_progress:
         on_progress("  $ " + " ".join(cmd) + "\n")
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True,
+        # 显式 UTF-8：subprocess 在 text 模式下由后台线程解码，若跟随
+        # 系统区域（中文 Windows 为 cp936）解码含中文路径/标签的
+        # ffmpeg 输出会抛 UnicodeDecodeError 且主线程 try 抓不到，
+        # 最终 stdout 变 None 导致后续 .strip() 崩溃。ffmpeg 输出本就 UTF-8。
+        encoding="utf-8", errors="replace",
+    )
     if proc.returncode != 0:
         if err_picker is not None:
             err = err_picker(proc)

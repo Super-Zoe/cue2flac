@@ -133,15 +133,25 @@ def dsd_plan(src: str, ffprobe: Optional[str] = None,
     return target_sr, cutoff, dsd_filter(target_sr, cutoff), dsd_note(target_sr, cutoff)
 
 
-def dsd_ffmpeg_args(src: str, ffprobe: Optional[str] = None) -> List[str]:
-    """生成 DSD → FLAC 所需的 ffmpeg 参数片段。
+def dsd_args_from_plan(target_sr: int, filt: str) -> List[str]:
+    """由 :func:`dsd_plan` 的已有结果生成 ffmpeg 参数片段。
 
-    调用方把它追加到自己的 ``ffmpeg`` 命令行里即可。
+    分轨与直转都已在转换前调用过 ``dsd_plan``，这里只做纯拼装，
+    **不会**再探测一次源文件（否则每首曲目都会多起一个 ffprobe）。
     """
-    target_sr, _cutoff, filt, _note = dsd_plan(src, ffprobe)
     return [
         "-af", filt,
         "-ar", str(target_sr),
         "-c:a", "flac",
         "-sample_fmt", "s32",
     ]
+
+
+def dsd_ffmpeg_args(src: str, ffprobe: Optional[str] = None) -> List[str]:
+    """生成 DSD → FLAC 所需的 ffmpeg 参数片段。
+
+    调用方把它追加到自己的 ``ffmpeg`` 命令行里即可；内部复用
+    :func:`dsd_args_from_plan`，保证与分轨 / 直转链路逐字符一致。
+    """
+    target_sr, _cutoff, filt, _note = dsd_plan(src, ffprobe)
+    return dsd_args_from_plan(target_sr, filt)

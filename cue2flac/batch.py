@@ -65,6 +65,59 @@ class BatchResult:
         return len(self.skipped)
 
 
+def _walk_files(
+    root: str,
+    recursive: bool,
+    predicate: Callable[[str], bool],
+) -> List[str]:
+    """扫描 root 下的文件，返回去重、按小写路径排序的绝对路径。
+
+    ``predicate`` 接收文件名（不含目录），决定是否纳入结果。
+    root 非法时抛 :class:`FileNotFoundError` —— ``process_directory``
+    依赖这个异常原样向上传播，不能在这里吞掉。
+    """
+    if not os.path.isdir(root):
+        raise FileNotFoundError(f"目录不存在或不是目录：{root}")
+
+    found: List[str] = []
+    seen: set[str] = set()
+    for dirpath, dirnames, filenames in os.walk(root):
+        for fn in filenames:
+            if predicate(fn):
+                full = os.path.abspath(os.path.join(dirpath, fn))
+                if full not in seen:
+                    seen.add(full)
+                    found.append(full)
+        if not recursive:
+            # 仅在顶层处理一次：清空子目录，停止下钻
+            dirnames[:] = []
+    found.sort(key=lambda p: p.lower())
+    return found
+
+
+def _unique_sorted(
+    paths: List[str],
+    exclude: Optional[Callable[[str], bool]] = None,
+) -> List[str]:
+    """把一组路径转成绝对路径、去重、按小写路径排序。
+
+    ``exclude(path)`` 返回 True 的路径不纳入结果。展开拖入路径
+    （文件 / 目录混合）时用它统一处理「绝对路径 + seen + 排序」模板。
+    """
+    found: List[str] = []
+    seen: set[str] = set()
+    for p in paths:
+        ap = os.path.abspath(p)
+        if ap in seen:
+            continue
+        seen.add(ap)
+        if exclude is not None and exclude(ap):
+            continue
+        found.append(ap)
+    found.sort(key=lambda x: x.lower())
+    return found
+
+
 def discover_cues(
     root: str,
     recursive: bool = True,
@@ -74,23 +127,7 @@ def discover_cues(
 
     recursive=True 时遍历子目录。
     """
-    if not os.path.isdir(root):
-        raise FileNotFoundError(f"目录不存在或不是目录：{root}")
-
-    found: List[str] = []
-    seen: set[str] = set()
-    for dirpath, dirnames, filenames in os.walk(root):
-        for fn in filenames:
-            if fn.lower().endswith(".cue"):
-                full = os.path.abspath(os.path.join(dirpath, fn))
-                if full not in seen:
-                    seen.add(full)
-                    found.append(full)
-        if not recursive:
-            # 仅在顶层处理一次：清空子目录，停止下钻
-            dirnames[:] = []
-
-    found.sort(key=lambda p: p.lower())
+    found = _walk_files(root, recursive, lambda fn: fn.lower().endswith(".cue"))
     if on_progress:
         on_progress(f"扫描完成：在 {root} 下发现 {len(found)} 个 CUE 文件。\n")
     return found
@@ -104,46 +141,25 @@ def expand_to_cues(paths: List[str], recursive: bool = True) -> List[str]:
     - 其它文件       → 忽略。
     返回的均为绝对路径，按小写路径排序。空输入返回空列表。
     """
-    cues: List[str] = []
-    seen: set[str] = set()
+    candidates: List[str] = []
     for p in paths:
         if os.path.isfile(p) and p.lower().endswith(".cue"):
-            ap = os.path.abspath(p)
-            if ap not in seen:
-                seen.add(ap)
-                cues.append(ap)
+            candidates.append(p)
         elif os.path.isdir(p):
             try:
-                found = discover_cues(p, recursive=recursive)
+                candidates.extend(discover_cues(p, recursive=recursive))
             except Exception:  # noqa: BLE001
-                found = []
-            for f in found:
-                if f not in seen:
-                    seen.add(f)
-                    cues.append(f)
-    cues.sort(key=lambda x: x.lower())
-    return cues
+                continue
+    return _unique_sorted(candidates)
 
 
 def discover_audio_files(root: str, recursive: bool = True) -> List[str]:
     """扫描 root 下所有受支持的音频文件（不含 .cue），返回排序后的绝对路径。"""
-    if not os.path.isdir(root):
-        raise FileNotFoundError(f"目录不存在或不是目录：{root}")
-
-    found: List[str] = []
-    seen: set[str] = set()
-    for dirpath, dirnames, filenames in os.walk(root):
-        for fn in filenames:
-            if os.path.splitext(fn)[1].lower() in SUPPORTED_EXTS:
-                full = os.path.abspath(os.path.join(dirpath, fn))
-                if full not in seen:
-                    seen.add(full)
-                    found.append(full)
-        if not recursive:
-            dirnames[:] = []
-
-    found.sort(key=lambda p: p.lower())
-    return found
+    return _walk_files(
+        root,
+        recursive,
+        lambda fn: os.path.splitext(fn)[1].lower() in SUPPORTED_EXTS,
+    )
 
 
 def expand_to_inputs(
@@ -197,28 +213,21 @@ def expand_to_inputs(
             return False
         return any(title == t or title.startswith(t) for t in track_titles)
 
-    audios: List[str] = []
-    seen: set[str] = set()
+    candidates: List[str] = []
     for p in paths:
         if os.path.isfile(p):
-            ext = os.path.splitext(p)[1].lower()
-            if ext in SUPPORTED_EXTS:
-                ap = os.path.abspath(p)
-                if ap not in referenced and ap not in seen \
-                        and not _is_generated_output(ap):
-                    seen.add(ap)
-                    audios.append(ap)
+            if os.path.splitext(p)[1].lower() in SUPPORTED_EXTS:
+                candidates.append(p)
         elif os.path.isdir(p):
             try:
-                found = discover_audio_files(p, recursive=recursive)
+                candidates.extend(discover_audio_files(p, recursive=recursive))
             except Exception:  # noqa: BLE001
-                found = []
-            for f in found:
-                if f not in referenced and f not in seen \
-                        and not _is_generated_output(f):
-                    seen.add(f)
-                    audios.append(f)
-    audios.sort(key=lambda x: x.lower())
+                continue
+
+    def _excluded(ap: str) -> bool:
+        return ap in referenced or _is_generated_output(ap)
+
+    audios = _unique_sorted(candidates, exclude=_excluded)
     return cues, audios
 
 

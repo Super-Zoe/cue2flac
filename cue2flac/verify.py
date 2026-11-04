@@ -101,7 +101,7 @@ class VerificationReport:
     total: int = 0
     passed: int = 0
     failed: int = 0
-    lossy: int = 0
+    lossy: int = 0                 # 预留字段：保留以兼容按关键字构造的调用方
     results: List[TrackVerifyResult] = field(default_factory=list)
 
     @property
@@ -696,6 +696,29 @@ def verify_outputs(
     return report
 
 
+def format_param_line(result: TrackVerifyResult, indent: str = "") -> str:
+    """渲染「采样率 / 位深 / 声道 / 帧数 / 时长」对照行。
+
+    三条展示路径（直转进度明细、直转汇总、分轨校验汇总）原本各写了一遍
+    完全相同的 ``.format(sr=..., sb=..., sc=..., sf=..., sd=...)``；
+    现统一到此处，差异只剩 ``indent`` 前缀。字段名、箭头、``?`` 兜底与
+    ``.3f`` 精度保持逐字不变（CI 冒烟脚本与测试对汇总文本做子串断言）。
+    """
+    return (
+        indent
+        + "采样率 {sr} / 位深 {sb} / 声道 {sc} / 帧数 {sf} / 时长 {sd}".format(
+            sr=f"{result.src_params.get('sample_rate', '?')}→"
+               f"{result.out_params.get('sample_rate', '?')}",
+            sb=f"{result.src_params.get('bits', '?')}→"
+               f"{result.out_params.get('bits', '?')}",
+            sc=f"{result.src_params.get('channels', '?')}→"
+               f"{result.out_params.get('channels', '?')}",
+            sf=f"{result.src_frames}→{result.out_frames}",
+            sd=f"{result.src_duration:.3f}s→{result.out_duration:.3f}s",
+        )
+    )
+
+
 def format_verification_report(report: VerificationReport) -> str:
     lines: List[str] = []
     lines.append("─" * 52)
@@ -707,17 +730,7 @@ def format_verification_report(report: VerificationReport) -> str:
     for r in report.results:
         status = "✓" if r.ok else "✗"
         lines.append(f"  {status} {os.path.basename(r.out_path)} —— {r.status}")
-        lines.append(
-            "      采样率 {sr} / 位深 {sb} / 声道 {sc} / 帧数 {sf} / 时长 {sd}".format(
-                sr=f"{r.src_params.get('sample_rate', '?')}→"
-                   f"{r.out_params.get('sample_rate', '?')}",
-                sb=f"{r.src_params.get('bits', '?')}→{r.out_params.get('bits', '?')}",
-                sc=f"{r.src_params.get('channels', '?')}→"
-                   f"{r.out_params.get('channels', '?')}",
-                sf=f"{r.src_frames}→{r.out_frames}",
-                sd=f"{r.src_duration:.3f}s→{r.out_duration:.3f}s",
-            )
-        )
+        lines.append(format_param_line(r, "      "))
         if r.lossy_reason:
             lines.append(f"      提示：{r.lossy_reason}")
         for w in r.warnings:

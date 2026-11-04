@@ -7,14 +7,13 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import subprocess
 from typing import List, Optional
 
 from .cue_parser import CueSheet, Track
 from .dsd import DSD_EXTS as _DSD_EXTS, DSD_CODECS as _DSD_CODECS
-from .dsd import dsd_plan
+from .dsd import dsd_plan, dsd_args_from_plan
 from .ffmpeg_provider import resolve_tool
 from .verify import verify_outputs, format_verification_report
 
@@ -116,7 +115,7 @@ _AUDIO_EXTS = (
 )
 
 
-def _safe_name(tr: Track, total: int) -> str:
+def _safe_name(tr: Track) -> str:
     """生成安全的输出文件名：NN. 标题（必要时追加表演者去重）。"""
     title = (tr.title or f"Track {tr.number:02d}").strip()
     for ch in '\\/:*?"<>|\r\n\t':
@@ -174,12 +173,7 @@ def split(
         target_sr, cutoff, filt, dsd_note_text = dsd_plan(
             sheet.tracks[0].file, ffprobe
         )
-        dsd_args = [
-            "-af", filt,
-            "-ar", str(target_sr),
-            "-c:a", "flac",
-            "-sample_fmt", "s32",
-        ]
+        dsd_args = dsd_args_from_plan(target_sr, filt)
         if on_progress:
             on_progress(
                 "注意：检测到 DSD 源码（.dsf/.dff）。DSD 是 1-bit 编码，转 FLAC（PCM）"
@@ -201,7 +195,7 @@ def split(
         if not sample_fmt and not is_dsd:
             sample_fmt = _detect_sample_fmt(tr.file, ffprobe)
 
-        out_name = _safe_name(tr, total) + ".flac"
+        out_name = _safe_name(tr) + ".flac"
         out_path = os.path.join(out_dir, out_name)
 
         cmd = [

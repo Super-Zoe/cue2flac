@@ -29,9 +29,13 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from cue2flac.cue_parser import parse_cue
-from cue2flac.batch import process_cues, process_all, expand_to_inputs, expand_to_cues
+from cue2flac.batch import process_cues, expand_to_inputs
 from cue2flac.config import get_out_dir, set_out_dir
-from cue2flac.convert import SUPPORTED_EXTS, is_supported_audio
+from cue2flac.convert import (
+    SUPPORTED_EXTS,
+    convert_files,
+    format_convert_summary,
+)
 from cue2flac.layout import plan_rows
 
 # 拖放为 Windows 原生实现（零依赖）；非 Windows 下 enable_drop 自动空操作。
@@ -582,8 +586,6 @@ class App(tk.Tk):
 
             # ② 不依赖 CUE 的直接转换
             if audio_paths:
-                from cue2flac.convert import convert_files, format_convert_summary
-
                 self.log("\n开始直接转换音频（不依赖 CUE）…\n")
                 convert_results = convert_files(
                     audio_paths,

@@ -21,21 +21,16 @@
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
 from .ffmpeg_provider import resolve_tool
-from .verify import probe_audio, pcm_md5, decode_ok, verify_output, SourceContext
-from .dsd import (
-    DSD_TARGETS,
-    dsd_filter,
-    dsd_note,
-    dsd_plan,
-    dsd_rate,
-    dsd_target,
-    is_dsd,
-)
+from .verify import probe_audio, verify_output, SourceContext, format_param_line
+from .dsd import dsd_args_from_plan, dsd_plan, is_dsd
 
 # ---------------------------------------------------------------------------
 # 格式常量
@@ -120,24 +115,6 @@ def _unique_path(path: str, used: dict) -> str:
     return f"{base}_{used[path]}{ext}"
 
 
-def _detect_bits(src: str, ffprobe: str) -> int:
-    """探测源文件的有效位深（取不到时返回 0）。"""
-    params = probe_audio(src, ffprobe)
-    if not params:
-        return 0
-    return int(params.get("bits") or 0)
-
-
-def _is_dsd(src: str, ffprobe: str) -> bool:
-    """判断源是否为 DSD（按容器扩展名或 ffprobe 解码器名）。"""
-    return is_dsd(src, ffprobe)
-
-
-def _dsd_rate(src: str, ffprobe: str) -> int:
-    """探测 DSD 源的解码输出采样率（DSD64 = 352800 Hz）。"""
-    return dsd_rate(src, ffprobe)
-
-
 def _copy_tags(src: str, dst: str, ff: str, tags: Optional[dict] = None) -> None:
     """把源文件的元数据（标题/表演者/专辑等）复制到输出 FLAC。
 
@@ -147,9 +124,6 @@ def _copy_tags(src: str, dst: str, ff: str, tags: Optional[dict] = None) -> None
     ``tags`` 由调用方传入时（来自同一次流探测的 ``format_tags``），
     直接复用，不再单独启动一次 ffprobe；不传时保持原来的自行探测行为。
     """
-    import subprocess
-    import tempfile
-
     try:
         if tags is None:
             meta = subprocess.run(
@@ -159,8 +133,6 @@ def _copy_tags(src: str, dst: str, ff: str, tags: Optional[dict] = None) -> None
             ) if (ffprobe := resolve_tool("ffprobe")) else None
             if meta is None or meta.returncode != 0:
                 return
-            import json
-
             tags = (json.loads(meta.stdout).get("format", {}) or {}).get("tags", {})
         if not tags:
             return
@@ -192,8 +164,6 @@ def _copy_tags(src: str, dst: str, ff: str, tags: Optional[dict] = None) -> None
 
 def _run(cmd: List[str]) -> None:
     """执行 ffmpeg，失败时抛出带错误输出的异常。"""
-    import subprocess
-
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "").strip()
@@ -274,12 +244,7 @@ def convert_file(
     if dsd:
         # ---- DSD 路径：低通 + 抽取降采样（高质量转换，非逐样本无损）----
         target_sr, cutoff, filt, note = dsd_plan(src, ffprobe, src_params)
-        cmd += [
-            "-af", filt,
-            "-ar", str(target_sr),
-            "-c:a", "flac",
-            "-sample_fmt", "s32",
-        ]
+        cmd += dsd_args_from_plan(target_sr, filt)
         res.note = note
         if on_progress:
             on_progress(f"  {res.name}：DSD 转换 → {target_sr} Hz FLAC\n")
@@ -388,17 +353,7 @@ def _print_verify_detail(r: "ConvertResult", on_progress) -> None:
     v = r.verify
     if v is None:
         return
-    on_progress(
-        "        校验：采样率 {sr} / 位深 {sb} / 声道 {sc} / 帧数 {sf} / 时长 {sd}\n".format(
-            sr=f"{v.src_params.get('sample_rate', '?')}→"
-               f"{v.out_params.get('sample_rate', '?')}",
-            sb=f"{v.src_params.get('bits', '?')}→{v.out_params.get('bits', '?')}",
-            sc=f"{v.src_params.get('channels', '?')}→"
-               f"{v.out_params.get('channels', '?')}",
-            sf=f"{v.src_frames}→{v.out_frames}",
-            sd=f"{v.src_duration:.3f}s→{v.out_duration:.3f}s",
-        )
-    )
+    on_progress(format_param_line(v, "        校验：") + "\n")
     if v.lossy_reason:
         on_progress(f"        提示：{v.lossy_reason}\n")
     for w in v.warnings:
@@ -424,18 +379,7 @@ def format_convert_summary(results: List[ConvertResult]) -> str:
         )
         v = r.verify
         if v is not None:
-            lines.append(
-                "      采样率 {sr} / 位深 {sb} / 声道 {sc} / 帧数 {sf} / 时长 {sd}".format(
-                    sr=f"{v.src_params.get('sample_rate', '?')}→"
-                       f"{v.out_params.get('sample_rate', '?')}",
-                    sb=f"{v.src_params.get('bits', '?')}→"
-                       f"{v.out_params.get('bits', '?')}",
-                    sc=f"{v.src_params.get('channels', '?')}→"
-                       f"{v.out_params.get('channels', '?')}",
-                    sf=f"{v.src_frames}→{v.out_frames}",
-                    sd=f"{v.src_duration:.3f}s→{v.out_duration:.3f}s",
-                )
-            )
+            lines.append(format_param_line(v, "      "))
         if r.note:
             lines.append(f"      说明：{r.note}")
         if v is not None and v.lossy_reason:

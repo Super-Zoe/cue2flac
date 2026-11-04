@@ -5,12 +5,12 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from .cue_parser import parse_cue
 from .splitter import split, SplitterError
-from .batch import process_directory, process_all, BatchResult
-from .convert import SUPPORTED_EXTS, format_convert_summary
+from .batch import process_all
+from .convert import SUPPORTED_EXTS
 from . import __version__
 
 
@@ -52,6 +52,48 @@ def _show_gui_message(kind: str, title: str, message: str) -> None:
         root.destroy()
     except Exception:
         pass
+
+
+def _report_error(
+    exc: Exception,
+    log_path: Optional[str],
+    title: str = "cue2flac 出错",
+    unexpected: bool = False,
+) -> int:
+    """统一的错误出口：stderr 文案 + 窗口化弹窗 + 退出码 1。
+
+    三个入口的**异常类型集合**不同（单 CUE 额外捕获 SplitterError），
+    由各入口自行 ``except``；这里只收敛重复的打印 / 弹窗 / return 样板。
+    """
+    prefix = "未预期错误" if unexpected else "错误"
+    print(f"{prefix}：{exc}", file=sys.stderr)
+    if log_path:
+        _show_gui_message("error", title, str(exc))
+    return 1
+
+
+def _finish(
+    msg: str,
+    log_path: Optional[str],
+    title: str,
+    kind: str = "info",
+    code: int = 0,
+) -> int:
+    """统一的成功 / 提示出口：stdout 文案 + 窗口化弹窗 + 退出码。
+
+    ``msg`` 与 ``title`` 由各入口自己构造——单 CUE / 混合 / 批量三种
+    汇总文案不同，不能合并成一份通用文案。
+    """
+    print(msg)
+    if log_path:
+        _show_gui_message(kind, title, msg)
+    return code
+
+
+def _count_convert(convert_results) -> Tuple[int, int]:
+    """返回 (直转成功数, 直转失败数)。"""
+    ok = sum(1 for r in convert_results if r.ok)
+    return ok, len(convert_results) - ok
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -158,20 +200,11 @@ def _run_single_cue(cue: str, args, log_path: Optional[str]) -> int:
             on_progress=lambda m: print(m, end=""),
         )
         msg = f"分轨完成，已生成 {len(results)} 个文件：\n{out_dir}"
-        print(msg)
-        if log_path:
-            _show_gui_message("info", "cue2flac 完成", msg)
-        return 0
+        return _finish(msg, log_path, "cue2flac 完成")
     except (FileNotFoundError, SplitterError, ValueError) as e:
-        print(f"错误：{e}", file=sys.stderr)
-        if log_path:
-            _show_gui_message("error", "cue2flac 出错", str(e))
-        return 1
+        return _report_error(e, log_path)
     except Exception as e:  # noqa: BLE001
-        print(f"未预期错误：{e}", file=sys.stderr)
-        if log_path:
-            _show_gui_message("error", "cue2flac 出错", str(e))
-        return 1
+        return _report_error(e, log_path, unexpected=True)
 
 
 def _run_mixed(inputs: List[str], args, log_path: Optional[str]) -> int:
@@ -187,37 +220,26 @@ def _run_mixed(inputs: List[str], args, log_path: Optional[str]) -> int:
             on_progress=lambda m: print(m, end=""),
         )
     except (FileNotFoundError, ValueError) as e:
-        print(f"错误：{e}", file=sys.stderr)
-        if log_path:
-            _show_gui_message("error", "cue2flac 出错", str(e))
-        return 1
+        return _report_error(e, log_path)
     except Exception as e:  # noqa: BLE001
-        print(f"未预期错误：{e}", file=sys.stderr)
-        if log_path:
-            _show_gui_message("error", "cue2flac 出错", str(e))
-        return 1
+        return _report_error(e, log_path, unexpected=True)
 
     print()
     cue_ok = result.success_count
     cue_skip = result.skip_count
-    conv_ok = sum(1 for r in convert_results if r.ok)
-    conv_fail = sum(1 for r in convert_results if not r.ok)
+    conv_ok, conv_fail = _count_convert(convert_results)
 
     if cue_ok == 0 and conv_ok == 0:
-        msg = "未成功处理任何文件，请检查日志中的跳过原因。"
-        print(msg)
-        if log_path:
-            _show_gui_message("error", "cue2flac", msg)
-        return 1
+        return _finish(
+            "未成功处理任何文件，请检查日志中的跳过原因。",
+            log_path, "cue2flac", kind="error", code=1,
+        )
 
     msg = (
         f"处理完成：分轨成功 {cue_ok} 个（跳过 {cue_skip} 个），"
         f"直接转换成功 {conv_ok} 个（失败 {conv_fail} 个）。"
     )
-    print(msg)
-    if log_path:
-        _show_gui_message("info", "cue2flac 完成", msg)
-    return 0
+    return _finish(msg, log_path, "cue2flac 完成")
 
 
 def _run_batch(root: str, args, log_path: Optional[str]) -> int:
@@ -234,39 +256,28 @@ def _run_batch(root: str, args, log_path: Optional[str]) -> int:
             on_progress=lambda m: print(m, end=""),
         )
     except (FileNotFoundError, ValueError) as e:
-        print(f"错误：{e}", file=sys.stderr)
-        if log_path:
-            _show_gui_message("error", "cue2flac 出错", str(e))
-        return 1
+        return _report_error(e, log_path)
     except Exception as e:  # noqa: BLE001
-        print(f"未预期错误：{e}", file=sys.stderr)
-        if log_path:
-            _show_gui_message("error", "cue2flac 出错", str(e))
-        return 1
+        return _report_error(e, log_path, unexpected=True)
 
     print()
-    conv_ok = sum(1 for r in convert_results if r.ok)
+    conv_ok, _conv_fail = _count_convert(convert_results)
     if result.scanned == 0 and not convert_results:
-        msg = f"在 {root} 下未发现任何 .cue 文件或可转换的音频文件。"
-        print(msg)
-        if log_path:
-            _show_gui_message("error", "cue2flac 批量", msg)
-        return 1
+        return _finish(
+            f"在 {root} 下未发现任何 .cue 文件或可转换的音频文件。",
+            log_path, "cue2flac 批量", kind="error", code=1,
+        )
     if result.success_count == 0 and conv_ok == 0:
-        msg = "未发现可成功处理的文件，请检查日志中的跳过原因。"
-        print(msg)
-        if log_path:
-            _show_gui_message("error", "cue2flac 批量", msg)
-        return 1
+        return _finish(
+            "未发现可成功处理的文件，请检查日志中的跳过原因。",
+            log_path, "cue2flac 批量", kind="error", code=1,
+        )
 
     msg = (
         f"批量处理完成：分轨成功 {result.success_count} 个（跳过 {result.skip_count} 个），"
         f"直接转换成功 {conv_ok} 个。"
     )
-    print(msg)
-    if log_path:
-        _show_gui_message("info", "cue2flac 批量完成", msg)
-    return 0
+    return _finish(msg, log_path, "cue2flac 批量完成")
 
 
 if __name__ == "__main__":

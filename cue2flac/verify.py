@@ -35,6 +35,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -108,12 +109,41 @@ class VerificationReport:
         return self.failed == 0
 
 
+@dataclass
+class SourceContext:
+    """同一源音频在一次批量校验中可复用的探测结果。
+
+    分轨时 ``sheet.tracks`` 里的 N 首曲目往往指向**同一个**整轨文件，
+    而 ``probe_audio``(容器参数) 与 ``decoded_stream_info``(解码后参数)
+    都与曲目无关。逐首重新探测会让源整轨被完整解码 O(N) 次。
+
+    ``key`` 由 ``(绝对路径, size, mtime_ns)`` 组成：批处理中若同一路径的
+    文件被覆盖写入，key 会变化，从而避免复用过期的参数。
+    """
+
+    path: str
+    key: Tuple = ()
+    params: Optional[Dict] = None       # probe_audio 的结果（容器参数）
+    decoded: Dict = field(default_factory=dict)  # 解码后的采样率 / 声道数
+
+
+def _source_key(path: str) -> Tuple:
+    """生成源音频的缓存键；stat 失败时退化为仅按路径（仍可用，但不复用旧参数）。"""
+    abspath = os.path.abspath(path or "")
+    try:
+        st = os.stat(abspath)
+        return (abspath, st.st_size, st.st_mtime_ns)
+    except OSError:
+        return (abspath, -1, -1)
+
+
 # --------------------------------------------------------------------------
 # 探测
 # --------------------------------------------------------------------------
 
 
-def probe_audio(path: str, ffprobe: str) -> Optional[Dict]:
+def probe_audio(path: str, ffprobe: str,
+                with_tags: bool = False) -> Optional[Dict]:
     """用 ffprobe 读取音频流参数；失败返回 None。
 
     位深同时读取 ``bits_per_raw_sample`` 与 ``bits_per_sample``：
@@ -126,15 +156,23 @@ def probe_audio(path: str, ffprobe: str) -> Optional[Dict]:
     ``s.get("codec_type") != "audio"`` 过滤而不把该字段列入白名单，
     就会把所有流都当成非音频流跳过，导致本函数恒返回 None、
     参数比对形同虚设。
+
+    ``with_tags=True`` 时在同一次调用里附带读取 ``format.tags``，
+    以 ``format_tags`` 键返回；默认 False 保持原有返回结构不变。
+    这样直转链路复制元数据时无需再单独启动一次 ffprobe。
     """
     try:
+        entries = (
+            "stream=codec_type,sample_rate,bits_per_raw_sample,bits_per_sample,"
+            "channels,codec_name,duration"
+        )
+        if with_tags:
+            entries += ":format_tags"
         out = subprocess.run(
             [
                 ffprobe, "-v", "error",
                 "-select_streams", "a:0",
-                "-show_entries",
-                "stream=codec_type,sample_rate,bits_per_raw_sample,bits_per_sample,"
-                "channels,codec_name,duration",
+                "-show_entries", entries,
                 "-of", "json", path,
             ],
             capture_output=True, text=True, timeout=60,
@@ -162,13 +200,16 @@ def probe_audio(path: str, ffprobe: str) -> Optional[Dict]:
         raw_bits = _int(s.get("bits_per_raw_sample"))
         sample_bits = _int(s.get("bits_per_sample"))
         bits = raw_bits or sample_bits
-        return {
+        params = {
             "sample_rate": _int(s.get("sample_rate")),
             "bits": bits,
             "channels": _int(s.get("channels")),
             "codec": s.get("codec_name", ""),
             "duration": float(s.get("duration") or 0),
         }
+        if with_tags:
+            params["format_tags"] = (data.get("format") or {}).get("tags") or {}
+        return params
     return None
 
 
@@ -186,32 +227,15 @@ def decode_ok(path: str, ff: str) -> Tuple[bool, str]:
     return True, ""
 
 
-def decoded_stream_info(path: str, ff: str) -> Dict:
-    """用 ffmpeg 解码到 null，读取**解码后**音频流的实际参数。
+def _parse_decoded_stream(text: str) -> Dict:
+    """从 ffmpeg 的 stderr 里解析**输出流**的采样率与声道数。
 
-    为什么不用 ffprobe 的容器参数：ffprobe 报告的是**容器**声明的采样率，
-    而解码器实际输出的采样率可能不同——
-    - DSD（.dsf/.dff）容器声明 2.8224MHz（这是 1-bit **比特率**），
-      ffmpeg 解码后实际输出 352.8kHz PCM（相差 8 倍）；
-    - 被重采样过的源，容器率与解码率也可能不一致。
-
-    帧数/时长必须基于**解码后**的真实速率推算，否则算出来的时长是错的。
-    ffmpeg 在 stderr 打印输出流信息，其中含解码后的采样率与声道数。
+    ffmpeg 会同时打印输入流和输出流的描述行，两者都以
+    ``Stream #0:0: Audio:`` 开头；按出现顺序覆盖后留在 dict 里的
+    是最后那条（输出流），这正是「解码后」的真实参数。
     """
     info: Dict = {}
-    try:
-        proc = subprocess.run(
-            [ff, "-nostdin", "-hide_banner", "-i", path,
-             "-map", "0:a:0?", "-f", "null", "-"],
-            capture_output=True, text=True, timeout=300,
-        )
-    except Exception:  # noqa: BLE001
-        return info
-    if proc.returncode != 0:
-        return info
-    # 输出流信息形如：
-    #   Stream #0:0: Audio: pcm_s16le, 48000 Hz, stereo, s16, 1536 kb/s
-    for line in (proc.stderr or "").splitlines():
+    for line in (text or "").splitlines():
         s = line.strip()
         if not s.startswith("Stream #0:0: Audio:"):
             continue
@@ -226,6 +250,36 @@ def decoded_stream_info(path: str, ff: str) -> Dict:
         elif re.search(r"\bstereo\b", s):
             info["decoded_channels"] = 2
     return info
+
+
+def decoded_stream_info(path: str, ff: str) -> Dict:
+    """用 ffmpeg 解码到 null，读取**解码后**音频流的实际参数。
+
+    为什么不用 ffprobe 的容器参数：ffprobe 报告的是**容器**声明的采样率，
+    而解码器实际输出的采样率可能不同——
+    - DSD（.dsf/.dff）容器声明 2.8224MHz（这是 1-bit **比特率**），
+      ffmpeg 解码后实际输出 352.8kHz PCM（相差 8 倍）；
+    - 被重采样过的源，容器率与解码率也可能不一致。
+
+    帧数/时长必须基于**解码后**的真实速率推算，否则算出来的时长是错的。
+    ffmpeg 在 stderr 打印输出流信息，其中含解码后的采样率与声道数。
+
+    保留为公开 API；生产校验路径已改用 :func:`_decode_pcm`，
+    后者在解码 PCM 的同一次进程里顺带取得同样的信息，无需再全解码一遍。
+    """
+    try:
+        proc = subprocess.run(
+            [ff, "-nostdin", "-hide_banner", "-i", path,
+             "-map", "0:a:0?", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=300,
+        )
+    except Exception:  # noqa: BLE001
+        return {}
+    if proc.returncode != 0:
+        return {}
+    # 输出流信息形如：
+    #   Stream #0:0: Audio: pcm_s16le, 48000 Hz, stereo, s16, 1536 kb/s
+    return _parse_decoded_stream(proc.stderr or "")
 
 
 def pcm_bytes(path: str, ff: str, start: float, end: Optional[float]) -> bytes:
@@ -249,12 +303,82 @@ def pcm_bytes(path: str, ff: str, start: float, end: Optional[float]) -> bytes:
     return proc.stdout
 
 
+#: 流式解码时每次从 stdout 读取的块大小（1 MiB），内存占用与音频长度无关。
+_PCM_CHUNK = 1 << 20
+
+
+def _decode_error(text: str) -> str:
+    """从 ffmpeg 的 stderr 里摘出真正的错误行，避免把 Input/Output 描述当错误。"""
+    bad = [
+        line.strip() for line in (text or "").splitlines()
+        if re.search(r"error|invalid|failed|corrupt|could not|unsupported", line, re.I)
+    ]
+    if bad:
+        return " | ".join(bad[-5:])[:400]
+    return (text or "").strip()[-400:]
+
+
+def _decode_pcm(path: str, ff: str, start: float, end: Optional[float]):
+    """**一次**解码同时产出 PCM MD5、字节数、解码后参数与可播放性。
+
+    用 ``Popen`` 流式读 stdout，边读边更新 MD5 并累计字节数，**不保留整段
+    PCM**：74 分钟 CD 原先需要源+输出两份 s32le 常驻（约 2.92 GiB），
+    现在峰值只有 1 MiB 量级的缓冲。
+
+    与原来的 ``decode_ok`` / ``decoded_stream_info`` / ``pcm_bytes`` 三次全解码
+    相比，stdout 的 PCM 字节流完全一致，因此 MD5、帧数、时长判据不变；
+    stderr 用临时文件承接（避免管道缓冲区满导致死锁），其中的输出流描述行
+    由 :func:`_parse_decoded_stream` 解析出解码后采样率与声道数。
+
+    返回 ``(md5, pcm_len, decoded_info, ok, err)``；解码失败时
+    ``md5=""``、``pcm_len=0``，与 ``pcm_bytes`` 返回 ``b""`` 的失败语义等价。
+    """
+    args = [ff, "-nostdin", "-hide_banner", "-nostats"]
+    if start:
+        args += ["-ss", f"{start:.6f}"]
+    if end is not None:
+        args += ["-to", f"{end:.6f}"]
+    args += ["-i", path, "-map", "0:a:0?", "-f", "s32le", "-c:a", "pcm_s32le", "-"]
+
+    digest = hashlib.md5()
+    total = 0
+    try:
+        with tempfile.TemporaryFile() as errf:
+            proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=errf)
+            try:
+                stream = proc.stdout
+                while True:
+                    chunk = stream.read(_PCM_CHUNK)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                    total += len(chunk)
+            finally:
+                stream.close()
+                try:
+                    rc = proc.wait(timeout=300)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                    raise
+            errf.seek(0)
+            stderr_text = errf.read().decode("utf-8", errors="replace")
+    except Exception as e:  # noqa: BLE001
+        return "", 0, {}, False, str(e)
+
+    info = _parse_decoded_stream(stderr_text)
+    if rc != 0:
+        return "", 0, info, False, _decode_error(stderr_text)
+    return digest.hexdigest(), total, info, True, ""
+
+
 def pcm_md5(path: str, ff: str, start: float, end: Optional[float]) -> str:
-    """把音频（区段）解码为 s32le 裸 PCM 并求 MD5，用于无损 / 无截断比对。"""
-    data = pcm_bytes(path, ff, start, end)
-    if not data:
-        return ""
-    return hashlib.md5(data).hexdigest()
+    """把音频（区段）解码为 s32le 裸 PCM 并求 MD5，用于无损 / 无截断比对。
+
+    走与校验主链路相同的流式解码实现，不再把整段 PCM 读进内存。
+    """
+    md5, _length, _info, ok, _err = _decode_pcm(path, ff, start, end)
+    return md5 if ok else ""
 
 
 def decoded_frames(pcm_len: int, channels: int) -> int:
@@ -360,6 +484,7 @@ def verify_output(
     track_no: int = 1,
     dsd_note: str = "",
     on_progress=None,
+    src_ctx: Optional[SourceContext] = None,
 ) -> TrackVerifyResult:
     """统一校验入口：分轨（比区段）与直转（比整文件）共用。
 
@@ -369,21 +494,39 @@ def verify_output(
       src_start / src_end —— 比对源的那个时间区段；直转时传 (0.0, None)
       dsd_note    —— 源为 DSD 时填入转换说明（如低通截止频率、目标采样率），
                     会被记入 ``lossy_reason`` 并在结果中明确标注为有损转换
+      src_ctx     —— 可选的「源音频探测上下文」（见 :class:`SourceContext`）。
+                    批量校验时由 :func:`verify_outputs` 按源文件缓存并复用，
+                    避免 N 首曲目反复探测 / 解码同一个整轨。不传时行为与
+                    单独校验完全一致。
     """
     res = TrackVerifyResult(out_path=out_path, track_no=track_no)
 
-    src = probe_audio(src_audio, ffprobe)
+    src = src_ctx.params if src_ctx is not None else probe_audio(src_audio, ffprobe)
     out = probe_audio(out_path, ffprobe)
     if src:
         res.src_params = src
     if out:
         res.out_params = out
 
+    # ---- 一次解码，同时取得 PCM 摘要 / 字节数 / 解码后参数 / 可播放性 ----
+    # 源与输出各解码 1 次（共 2 次），取代原先的
+    # decode_ok + decoded_stream_info(src) + decoded_stream_info(out)
+    # + pcm_bytes(src) + pcm_bytes(out) 共 5 次全解码。
+    # PCM 以流式方式处理，内存占用与音频长度无关。
+    src_md5, src_pcm_len, src_dec, _src_ok, _src_err = _decode_pcm(
+        src_audio, ff, src_start, src_end
+    )
+    out_md5, out_pcm_len, out_dec, out_ok, out_err = _decode_pcm(
+        out_path, ff, 0.0, None
+    )
+    # 同一整轨的解码后参数回填到上下文，后续曲目无需重复解析。
+    if src_ctx is not None and src_dec and not src_ctx.decoded:
+        src_ctx.decoded = dict(src_dec)
+
     # ---- 1) 可播放性 ----
-    ok, err = decode_ok(out_path, ff)
-    res.playable = ok
-    if not ok:
-        res.errors.append("文件无法解码（可能已损坏）：" + str(err)[:300])
+    res.playable = out_ok
+    if not out_ok:
+        res.errors.append("文件无法解码（可能已损坏）：" + str(out_err)[:300])
 
     is_dsd = bool(src) and str(src.get("codec", "")).lower().startswith("dsd")
     # 只要调用方明确声明了「本次转换有损」（如 DSD → PCM），
@@ -401,27 +544,25 @@ def verify_output(
     res.params_match = params_ok
 
     # ---- 3) 长度比对：帧数 / 时长 ----
-    src_pcm = pcm_bytes(src_audio, ff, src_start, src_end)
-    out_pcm = pcm_bytes(out_path, ff, 0.0, None)
     src_ch = int((src or {}).get("channels") or 0)
     out_ch = int((out or {}).get("channels") or 0)
 
     # 采样率必须取**解码后**的真实值：DSD 容器声明 2.8224MHz（1-bit 比特率），
     # 而 ffmpeg 解码后输出的是 352.8kHz PCM（相差 8 倍）。
-    # 用容器率推算时长会得到错误结果。
-    src_dec = decoded_stream_info(src_audio, ff)
-    out_dec = decoded_stream_info(out_path, ff)
-    src_rate = int(src_dec.get("decoded_sample_rate")
+    # 用容器率推算时长会得到错误结果。解码后参数已由同一次 s32le 解码的
+    # 输出流描述行给出；上下文里缓存的值作为兜底。
+    dec_src = src_dec or (src_ctx.decoded if src_ctx is not None else {}) or {}
+    src_rate = int(dec_src.get("decoded_sample_rate")
                    or (src or {}).get("sample_rate") or 0)
     out_rate = int(out_dec.get("decoded_sample_rate")
                    or (out or {}).get("sample_rate") or 0)
-    src_ch = int(src_dec.get("decoded_channels") or src_ch) or src_ch
+    src_ch = int(dec_src.get("decoded_channels") or src_ch) or src_ch
     out_ch = int(out_dec.get("decoded_channels") or out_ch) or out_ch
 
-    res.src_frames = decoded_frames(len(src_pcm), src_ch)
-    res.out_frames = decoded_frames(len(out_pcm), out_ch)
+    res.src_frames = decoded_frames(src_pcm_len, src_ch)
+    res.out_frames = decoded_frames(out_pcm_len, out_ch)
 
-    if not src_pcm or not out_pcm:
+    if not src_pcm_len or not out_pcm_len:
         res.errors.append("无法对源 / 输出做 PCM 解码（跳过长度与无损校验）")
         res.length_match = False
         res.no_truncation = False
@@ -443,9 +584,7 @@ def verify_output(
         # 此时长度一致性靠帧数 / 时长比对保证
         res.lossless = False
     else:
-        src_md5 = hashlib.md5(src_pcm).hexdigest()
-        out_md5 = hashlib.md5(out_pcm).hexdigest()
-        if src_md5 == out_md5:
+        if src_md5 and out_md5 and src_md5 == out_md5:
             res.lossless = True
         else:
             res.errors.append(
@@ -466,6 +605,7 @@ def verify_track(
     ffprobe: str,
     on_progress=None,
     dsd_note: str = "",
+    src_ctx: Optional[SourceContext] = None,
 ) -> TrackVerifyResult:
     """校验分轨输出（比对源文件的某个时间区段）。
 
@@ -475,7 +615,7 @@ def verify_track(
     return verify_output(
         src_audio, out_path, ff, ffprobe,
         src_start=src_start, src_end=src_end, track_no=track_no,
-        dsd_note=dsd_note, on_progress=on_progress,
+        dsd_note=dsd_note, on_progress=on_progress, src_ctx=src_ctx,
     )
 
 
@@ -486,6 +626,7 @@ def verify_whole_file(
     ffprobe: str,
     on_progress=None,
     dsd_note: str = "",
+    src_ctx: Optional[SourceContext] = None,
 ) -> TrackVerifyResult:
     """校验「整轨文件 → FLAC」的直接转换结果（比对整个文件）。
 
@@ -495,7 +636,7 @@ def verify_whole_file(
     return verify_output(
         src_audio, out_path, ff, ffprobe,
         src_start=0.0, src_end=None, track_no=1,
-        dsd_note=dsd_note, on_progress=on_progress,
+        dsd_note=dsd_note, on_progress=on_progress, src_ctx=src_ctx,
     )
 
 
@@ -510,18 +651,33 @@ def verify_outputs(
     """对一批分轨输出逐一校验，返回汇总报告。
 
     sheet.tracks 与 out_paths 按出现顺序一一对应。
+
+    同一源整轨的容器参数按 ``(绝对路径, size, mtime_ns)`` 缓存：
+    N 首曲目只探测一次；解码后参数在首次 PCM 解码时回填到同一个上下文，
+    因此源整轨不再需要额外做整文件全解码。多 ``FILE`` 的 CUE
+    则按各自的音源文件分别缓存。
     """
     report = VerificationReport()
     report.total = len(out_paths)
+    ctx_cache: Dict[Tuple, SourceContext] = {}
     for i, out_path in enumerate(out_paths):
         if i >= len(sheet.tracks):
             break
         tr = sheet.tracks[i]
+        key = _source_key(tr.file)
+        ctx = ctx_cache.get(key)
+        if ctx is None:
+            ctx = SourceContext(
+                path=tr.file,
+                key=key,
+                params=probe_audio(tr.file, ffprobe),
+            )
+            ctx_cache[key] = ctx
         if on_progress:
             on_progress(f"  校验 {os.path.basename(out_path)} …\n")
         r = verify_track(
             tr.file, tr.start, tr.end, out_path, tr.number, ff, ffprobe,
-            on_progress, dsd_note=dsd_note,
+            on_progress, dsd_note=dsd_note, src_ctx=ctx,
         )
         report.results.append(r)
         if r.ok:

@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
 from .ffmpeg_provider import resolve_tool
-from .verify import probe_audio, pcm_md5, decode_ok, verify_output
+from .verify import probe_audio, pcm_md5, decode_ok, verify_output, SourceContext
 from .dsd import (
     DSD_TARGETS,
     dsd_filter,
@@ -138,26 +138,30 @@ def _dsd_rate(src: str, ffprobe: str) -> int:
     return dsd_rate(src, ffprobe)
 
 
-def _copy_tags(src: str, dst: str, ff: str) -> None:
+def _copy_tags(src: str, dst: str, ff: str, tags: Optional[dict] = None) -> None:
     """把源文件的元数据（标题/表演者/专辑等）复制到输出 FLAC。
 
     用 ffmetadata 中转：ffprobe 导出 → ffmpeg 导入。
     失败不影响转换本身（标签只是附加信息）。
+
+    ``tags`` 由调用方传入时（来自同一次流探测的 ``format_tags``），
+    直接复用，不再单独启动一次 ffprobe；不传时保持原来的自行探测行为。
     """
     import subprocess
     import tempfile
 
     try:
-        meta = subprocess.run(
-            [ffprobe, "-v", "error", "-show_entries", "format_tags",
-             "-of", "json", src],
-            capture_output=True, text=True, timeout=60,
-        ) if (ffprobe := resolve_tool("ffprobe")) else None
-        if meta is None or meta.returncode != 0:
-            return
-        import json
+        if tags is None:
+            meta = subprocess.run(
+                [ffprobe, "-v", "error", "-show_entries", "format_tags",
+                 "-of", "json", src],
+                capture_output=True, text=True, timeout=60,
+            ) if (ffprobe := resolve_tool("ffprobe")) else None
+            if meta is None or meta.returncode != 0:
+                return
+            import json
 
-        tags = (json.loads(meta.stdout).get("format", {}) or {}).get("tags", {})
+            tags = (json.loads(meta.stdout).get("format", {}) or {}).get("tags", {})
         if not tags:
             return
         with tempfile.NamedTemporaryFile(
@@ -252,7 +256,13 @@ def convert_file(
         res.note = "源文件已是 FLAC 且输出位置与源相同，未做改动。"
         return res
 
-    dsd = _is_dsd(src, ffprobe)
+    # ---- 一次流探测，贯穿 DSD 判定 / 位深 / FLAC 流拷贝 / 元数据 / 输出校验 ----
+    # 同一份结果向下传递，避免对同一个源文件反复启动 ffprobe。
+    src_probe = probe_audio(src, ffprobe, with_tags=True) or {}
+    src_params = {k: v for k, v in src_probe.items() if k != "format_tags"}
+    src_tags = src_probe.get("format_tags")  # None 表示探测失败，交给 _copy_tags 兜底
+
+    dsd = is_dsd(src, ffprobe, src_params)
     ext = os.path.splitext(src)[1].lower()
 
     cmd = [
@@ -263,7 +273,7 @@ def convert_file(
 
     if dsd:
         # ---- DSD 路径：低通 + 抽取降采样（高质量转换，非逐样本无损）----
-        target_sr, cutoff, filt, note = dsd_plan(src, ffprobe)
+        target_sr, cutoff, filt, note = dsd_plan(src, ffprobe, src_params)
         cmd += [
             "-af", filt,
             "-ar", str(target_sr),
@@ -275,13 +285,13 @@ def convert_file(
             on_progress(f"  {res.name}：DSD 转换 → {target_sr} Hz FLAC\n")
     else:
         # ---- PCM 系路径：逐样本无损 ----
-        bits = _detect_bits(src, ffprobe)
+        bits = int(src_params.get("bits") or 0)
         cmd += ["-c:a", "flac"]
         if ext == ".flac":
             # 已是 FLAC：流拷贝即可，完全不重新编码。
             # 流拷贝时 ffmpeg 不会自动填充输出流参数，必须显式给出采样率，
             # 否则写头时报 "sample rate not set / Could not write header"。
-            src_rate = int((probe_audio(src, ffprobe) or {}).get("sample_rate") or 0)
+            src_rate = int(src_params.get("sample_rate") or 0)
             cmd = [
                 ff, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
                 "-i", src, "-map", "0:a:0", "-c:a", "copy",
@@ -313,7 +323,7 @@ def convert_file(
         return res
 
     # 复制元数据（失败不影响主流程）
-    _copy_tags(src, out_path, ff)
+    _copy_tags(src, out_path, ff, src_tags)
 
     res.out_path = out_path
 
@@ -325,6 +335,7 @@ def convert_file(
             src, out_path, ff, ffprobe,
             src_start=0.0, src_end=None, track_no=1,
             dsd_note=res.note if dsd else "",
+            src_ctx=SourceContext(path=src, params=src_params),
         )
         res.verify = vres
         res.src_params = vres.src_params
@@ -334,7 +345,7 @@ def convert_file(
         res.warnings.extend(vres.warnings)
     else:
         res.out_params = probe_audio(out_path, ffprobe) or {}
-        res.src_params = probe_audio(src, ffprobe) or {}
+        res.src_params = src_params or {}
         res.lossless = not dsd
 
     res.ok = not res.errors

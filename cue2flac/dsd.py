@@ -59,26 +59,35 @@ DSD_TARGETS: Dict[int, Tuple[int, int]] = {
 DEFAULT_TARGET = (88200, 24000)
 
 
-def is_dsd(src: str, ffprobe: Optional[str] = None) -> bool:
-    """判断源是否为 DSD（按容器扩展名或 ffprobe 解码器名）。"""
+def is_dsd(src: str, ffprobe: Optional[str] = None,
+           params: Optional[Dict] = None) -> bool:
+    """判断源是否为 DSD（按容器扩展名或 ffprobe 解码器名）。
+
+    ``params`` 可由调用方传入已有的 :func:`~cue2flac.verify.probe_audio` 结果，
+    避免同一文件被重复探测；不传时行为与原来完全一致。
+    """
     if os.path.splitext(src)[1].lower() in DSD_EXTS:
         return True
-    if ffprobe is None:
-        ffprobe = resolve_tool("ffprobe")
-    params = probe_audio(src, ffprobe)
+    if params is None:
+        if ffprobe is None:
+            ffprobe = resolve_tool("ffprobe")
+        params = probe_audio(src, ffprobe)
     codec = (params or {}).get("codec", "").lower()
     return codec.startswith("dsd")
 
 
-def dsd_rate(src: str, ffprobe: Optional[str] = None) -> int:
+def dsd_rate(src: str, ffprobe: Optional[str] = None,
+             params: Optional[Dict] = None) -> int:
     """探测 DSD 源的**解码输出采样率**（Hz）。
 
     注意这是 ffprobe 报告的值，即容器声明值 ÷ 8（DSD64 → 352800）。
     它恰好就是 :data:`DSD_TARGETS` 的键，可直接查表。
+    ``params`` 传入时直接复用，不再启动 ffprobe。
     """
-    if ffprobe is None:
-        ffprobe = resolve_tool("ffprobe")
-    params = probe_audio(src, ffprobe)
+    if params is None:
+        if ffprobe is None:
+            ffprobe = resolve_tool("ffprobe")
+        params = probe_audio(src, ffprobe)
     return int((params or {}).get("sample_rate") or 0)
 
 
@@ -111,13 +120,15 @@ def dsd_note(target_sr: int, cutoff: int) -> str:
     )
 
 
-def dsd_plan(src: str, ffprobe: Optional[str] = None) -> Tuple[int, int, str, str]:
+def dsd_plan(src: str, ffprobe: Optional[str] = None,
+             params: Optional[Dict] = None) -> Tuple[int, int, str, str]:
     """一次性算出 DSD 转换所需的全部参数。
 
     返回 ``(目标采样率, 低通截止 Hz, 滤镜链, 性质说明)``。
     分轨与直转都调用它，保证两条链路的 DSD 行为完全一致。
+    ``params`` 传入时复用已有探测结果，不再启动 ffprobe。
     """
-    rate = dsd_rate(src, ffprobe)
+    rate = dsd_rate(src, ffprobe, params)
     target_sr, cutoff = dsd_target(rate)
     return target_sr, cutoff, dsd_filter(target_sr, cutoff), dsd_note(target_sr, cutoff)
 

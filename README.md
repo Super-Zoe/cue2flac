@@ -499,8 +499,21 @@ cue2flac/
 
 仓库已包含 GitHub Actions（`.github/workflows/build.yml`）：推送 `main` 分支或手动触发，即可在 Windows runner 上自动下载 ffmpeg、打包并发布到 Release 与 Artifacts。本地手动打包命令与 CI 一致（**onefile 控制台构建，已内嵌 ffmpeg**）：
 
+> **CI 依赖版本已全部固定**（不使用 `latest`、浮动标签或动态解析），构建结果可复现：
+>
+> | 依赖 | 固定版本 |
+> |---|---|
+> | ffmpeg / ffprobe | `N-128352-gec887b13a8`（BtbN tag `autobuild-2026-11-03-12-50`，下载后校验 SHA256） |
+> | Python | `3.11.9`（runner：`windows-2025`） |
+> | PyInstaller | `6.22.3` |
+> | pytest / PyYAML | `9.2.0` / `6.0.3` |
+> | pip | `26.3` |
+> | GitHub Actions | `checkout@11d5960a` (v4.4.0)、`setup-python@a26af69b` (v5.6.0)、`upload-artifact@ea165f8d` (v4.6.2)，均锁定到 commit SHA |
+>
+> 升级其中任一项时，请同步修改 `.github/workflows/build.yml` 中的对应版本号与 SHA256 校验值。
+
 ```bash
-pip install pyinstaller
+pip install "pyinstaller==6.22.3"
 pyinstaller --noconfirm --onefile --name cue2flac ^
   --hidden-import cue2flac ^
   --hidden-import cue2flac.cli ^
@@ -527,7 +540,8 @@ pyinstaller --noconfirm --onefile --name cue2flac ^
 ## 开发与测试
 
 ```bash
-pip install -r requirements.txt   # 含 pytest 等
+pip install -r requirements.txt   # 打包依赖（pyinstaller==6.22.3）
+pip install "pytest==9.2.0" "pyyaml==6.0.3"   # 测试依赖
 python -m pytest -q                # 运行全部测试
 ```
 

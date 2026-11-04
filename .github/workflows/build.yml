@@ -18,35 +18,62 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    # 固定 runner 镜像标签（原为 windows-latest，属浮动标签）
+    runs-on: windows-2025
     steps:
+      # Actions 一律锁定到 40 位 commit SHA（括号内为对应的语义化版本号），
+      # 避免 v4/v5 这类会随上游更新的浮动标签导致构建行为漂移。
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.11"
+          # 固定到具体补丁版本（原为 "3.11"，会解析到该分支的最新小版本）
+          python-version: "3.11.9"
 
       - name: Install PyInstaller
-        run: python -m pip install --upgrade pip pyinstaller
+        run: python -m pip install --upgrade "pip==26.3" "pyinstaller==6.22.3"
 
       - name: Layout & GUI smoke tests
         shell: pwsh
         run: |
           # 折行算法（纯计算）+ GUI 布局冒烟（需 tkinter；无显示环境会自动跳过）
           # + 工作流 YAML 静态校验（防止 YAML 解析失败导致 CI 直接红）
-          python -m pip install pytest pyyaml
+          python -m pip install "pytest==9.2.0" "pyyaml==6.0.3"
           python -m pytest tests/test_layout.py tests/test_gui_smoke.py tests/test_workflow.py -q -rs --tb=short
 
       - name: Download ffmpeg (with ffprobe) for Windows
         shell: pwsh
+        env:
+          # ---- 固定版本（禁止使用 latest / 浮动标签）----
+          # 下载源：BtbN/FFmpeg-Builds（保持不变）
+          # 版本：autobuild-2026-11-03-12-50 对应 ffmpeg N-128352-gec887b13a8
+          #      （即 ffmpeg version N-128352-gec887b13a8-20261103）
+          # 资产名在固定 tag 下带具体版本号，不能再用 master-latest 命名
+          FFMPEG_TAG: "autobuild-2026-11-03-12-50"
+          FFMPEG_BUILD: "N-128352-gec887b13a8"
+          FFMPEG_ZIP: "ffmpeg-N-128352-gec887b13a8-win64-gpl.zip"
+          # 该 zip 的 SHA256（GitHub Release API 的 digest 字段，已本地复核一致）
+          FFMPEG_SHA256: "19a2c9c8202dceb896ce7df9195f268c8d0f65300f76c3663f45c4dbaf8d10d6"
         run: |
-          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$env:FFMPEG_TAG/$env:FFMPEG_ZIP"
+          Write-Host "下载 ffmpeg（固定版本）: $url"
           Invoke-WebRequest -URI $url -OutFile ffmpeg.zip
+          # 校验完整性：SHA256 必须与锁定值一致，防止上游资产被替换
+          $hash = (Get-FileHash ffmpeg.zip -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:FFMPEG_SHA256) {
+            Write-Error "ffmpeg.zip SHA256 不匹配：期望 $env:FFMPEG_SHA256，实际 $hash"
+            exit 1
+          }
+          Write-Host "SHA256 校验通过: $hash"
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp
           $ff = Get-ChildItem ffmpeg_tmp -Recurse -Filter ffmpeg.exe | Select-Object -First 1
           $fp = Get-ChildItem ffmpeg_tmp -Recurse -Filter ffprobe.exe | Select-Object -First 1
+          if (-not $ff -or -not $fp) {
+            Write-Error "压缩包内未找到 ffmpeg.exe / ffprobe.exe"
+            exit 1
+          }
           Copy-Item $ff.FullName ffmpeg.exe
           Copy-Item $fp.FullName ffprobe.exe
           echo "ffmpeg: $($ff.FullName)"
@@ -480,7 +507,7 @@ jobs:
           Write-Host "Batch smoke test OK: 成功 2 个专辑 / 跳过 1 个损坏 CUE / 共 3 首 FLAC"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cue2flac-portable
           path: dist/cue2flac.exe
@@ -495,5 +522,8 @@ jobs:
           git push origin :refs/tags/portable 2>$null
           gh release create portable dist/cue2flac.exe `
             --title "cue2flac 便携版（内嵌 ffmpeg）" `
-            --notes "自动构建的单文件便携 exe，已内嵌 ffmpeg/ffprobe，双击即可使用，无需安装任何环境。" `
+            --notes "自动构建的单文件便携 exe，已内嵌 ffmpeg/ffprobe（固定版本 N-128352-gec887b13a8），双击即可使用，无需安装任何环境。" `
             --latest
+          # 注：上面的 --latest 是 gh CLI 的「把此 Release 标记为 latest」开关
+          # （控制 Release 页的 Latest 标识），与依赖下载的版本选择无关，
+          # 不属于需要固定版本的浮动标签。

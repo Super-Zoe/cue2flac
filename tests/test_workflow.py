@@ -7,6 +7,7 @@ CI 直接 failure 且没有任何日志可查。本模块把这类错误提前�
 """
 
 import os
+import re
 import shutil
 import subprocess
 
@@ -271,3 +272,175 @@ def test_ci_tool_paths_exist_in_workspace_root():
     # ffmpeg 可执行文件同理
     assert "./ffmpeg/ffmpeg.exe" not in runs, \
         "CI 中 ffmpeg 的路径不对：它在仓库根目录，不在 ffmpeg/ 子目录"
+
+
+# ---------------------------------------------------------------------------
+# 依赖版本固定（禁止 latest / 浮动标签 / 动态解析）
+# ---------------------------------------------------------------------------
+
+#: 允许出现在 URL 中的版本号形态：日期型 tag 或带版本号的资产名。
+_FIXED_VERSION_PAT = r"(?:\d{4}-\d{2}-\d{2}|N-\d+|n\d+\.\d+|\d+\.\d+)"
+
+
+def _all_urls():
+    """抽出工作流中出现的所有 URL。"""
+    data = _load()
+    urls = []
+    for job in data["jobs"].values():
+        for step in job.get("steps", []):
+            blob = str(step.get("run", "")) + " " + str(step.get("uses", ""))
+            for part in blob.split():
+                if "://" in part:
+                    urls.append((str(step.get("name", "")), part.strip("\"',`;")))
+    return urls
+
+
+def test_no_download_uses_latest_or_floating_tag():
+    """下载依赖不得使用 latest / master / 浮动标签，必须指向固定版本。
+
+    回归防护：ffmpeg 原先从 `releases/download/latest/...` 下载，
+    上游 master 一变，CI 内嵌的 ffmpeg 就跟着变，构建结果不可复现，
+    且某次上游重命名 demuxer 就会让 CI 无预警变红。
+    """
+    for step_name, url in _all_urls():
+        assert "/download/latest/" not in url, (
+            f"步骤 {step_name!r} 的下载地址使用了 latest 浮动标签：{url}"
+        )
+        assert "/download/master" not in url, (
+            f"步骤 {step_name!r} 的下载地址使用了 master 浮动分支：{url}"
+        )
+        assert "latest.zip" not in url.lower(), (
+            f"步骤 {step_name!r} 的下载地址疑似 latest 资产：{url}"
+        )
+
+
+def test_ffmpeg_download_is_pinned_to_exact_release():
+    """ffmpeg 下载必须锁定到具体的 release tag 与带版本号的资产名。"""
+    data = _load()
+    steps = [
+        st
+        for job in data["jobs"].values()
+        for st in job.get("steps", [])
+    ]
+    dl = [
+        st for st in steps
+        if "Download ffmpeg" in str(st.get("name", ""))
+    ]
+    assert dl, "未找到 ffmpeg 下载步骤"
+
+    step = dl[0]
+    env = step.get("env") or {}
+    run = str(step.get("run", ""))
+
+    # 1) 版本号必须以环境变量的形式显式声明
+    assert "FFMPEG_TAG" in env, "ffmpeg 下载未声明固定的 release tag"
+    assert "FFMPEG_BUILD" in env, "ffmpeg 下载未声明固定的构建号"
+    assert "FFMPEG_SHA256" in env, "ffmpeg 下载未声明 SHA256 校验值"
+
+    # 2) tag 必须是日期型的具体版本，不能是 latest
+    tag = str(env["FFMPEG_TAG"])
+    assert tag != "latest", "FFMPEG_TAG 不能是 latest"
+    assert re.fullmatch(r"autobuild-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}", tag), (
+        f"FFMPEG_TAG 不是固定的日期型版本号：{tag}"
+    )
+
+    # 3) 资产名必须带具体构建号（固定 tag 下的资产名不再用 master-latest 命名）
+    build = str(env["FFMPEG_BUILD"])
+    assert re.fullmatch(r"N-\d+-g[0-9a-f]+", build), (
+        f"FFMPEG_BUILD 不是固定的构建号：{build}"
+    )
+    assert build in str(env["FFMPEG_ZIP"]), (
+        "FFMPEG_ZIP 的资产名应包含固定的构建号"
+    )
+
+    # 4) SHA256 必须是 64 位十六进制，且下载后必须实际校验
+    sha = str(env["FFMPEG_SHA256"])
+    assert re.fullmatch(r"[0-9a-f]{64}", sha), f"FFMPEG_SHA256 格式不对：{sha}"
+    assert "Get-FileHash" in run, "ffmpeg 下载后未做 SHA256 校验"
+    assert "SHA256" in run, "ffmpeg 下载步骤未体现 SHA256 校验"
+
+    # 5) 下载源保持不变
+    assert "BtbN/FFmpeg-Builds" in run, "ffmpeg 下载源被改动了，应保持 BtbN/FFmpeg-Builds"
+
+
+def test_python_dependencies_are_pinned():
+    """pip 安装的依赖必须锁定到具体版本，禁止不带版本号的裸包名。"""
+    data = _load()
+    runs = "\n".join(
+        str(step.get("run", ""))
+        for job in data["jobs"].values()
+        for step in job.get("steps", [])
+    )
+    # 所有 pip install 必须带 == 版本约束
+    for line in runs.splitlines():
+        s = line.strip()
+        if "pip install" not in s:
+            continue
+        # 去掉 pip 自身的升级开关与 --upgrade 等选项
+        args = [
+            a for a in s.split()
+            if not a.startswith("-")
+            and a not in ("pip", "install", "python", "-m")
+        ]
+        pkgs = [a for a in args if not a.startswith("pip==")]
+        for p in pkgs:
+            assert "==" in p, (
+                f"pip 安装未固定版本号：{p!r}（整行：{s!r}）"
+            )
+
+
+def test_actions_are_pinned_to_commit_sha():
+    """GitHub Actions 必须锁定到 40 位 commit SHA，不能用 v4/v5 这类浮动标签。"""
+    data = _load()
+    for job in data["jobs"].values():
+        for step in job.get("steps", []):
+            uses = str(step.get("uses", ""))
+            if not uses.startswith("actions/"):
+                continue
+            assert "@" in uses, f"Action 未指定版本：{uses}"
+            ref = uses.split("@", 1)[1]
+            assert re.fullmatch(r"[0-9a-f]{40}", ref), (
+                f"Action 未锁定到 commit SHA（浮动标签会随上游漂移）：{uses}"
+            )
+
+
+def test_runner_image_and_python_version_are_fixed():
+    """runner 镜像与 Python 版本都必须是固定值，不能是 latest / 浮动分支。"""
+    data = _load()
+    for job_name, job in data["jobs"].items():
+        runs_on = str(job.get("runs-on", ""))
+        assert runs_on != "windows-latest", (
+            f"job {job_name} 的 runner 镜像使用了 latest 浮动标签"
+        )
+        assert re.fullmatch(r"windows-\d{4}", runs_on), (
+            f"job {job_name} 的 runner 镜像未固定到具体版本：{runs_on}"
+        )
+
+    for job in data["jobs"].values():
+        for step in job.get("steps", []):
+            uses = str(step.get("uses", ""))
+            if not uses.startswith("actions/setup-python"):
+                continue
+            ver = str((step.get("with") or {}).get("python-version", ""))
+            assert re.fullmatch(r"\d+\.\d+\.\d+", ver), (
+                f"Python 版本未固定到具体补丁版本：{ver!r}"
+            )
+
+
+def test_requirements_txt_pins_pyinstaller():
+    """requirements.txt 里的打包依赖必须固定版本，避免与 CI 不一致。"""
+    req = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "requirements.txt",
+    )
+    if not os.path.isfile(req):
+        pytest.skip("未找到 requirements.txt")
+    content = open(req, encoding="utf-8").read()
+    for line in content.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        assert "==" in s, f"requirements.txt 中的依赖未固定版本：{s!r}"
+        assert ">" not in s and "<" not in s, (
+            f"requirements.txt 中不应使用版本范围：{s!r}"
+        )

@@ -453,6 +453,7 @@ python main.py "D:/Music/album.ape" "D:/Music/track.wav" -o "D:/Music/FLAC"
 cue2flac/
 ├── cue2flac/              # 核心包
 │   ├── cue_parser.py       # CUE 解析（多编码探测、时间码换算、音轨定位）
+│   ├── _util.py            # 公共工具函数与格式常量单一真源（分轨 / 直转 / 批量 / GUI 共用）
 │   ├── splitter.py         # 分轨核心（ffmpeg 切片 + 元数据 + 文件名安全化）
 │   ├── batch.py            # 批量扫描目录 / 汇总结果 / 输出目录防重名
 │   ├── convert.py          # 不依赖 CUE 的整轨直转 FLAC（位深保持 / 无损校验）
@@ -516,6 +517,7 @@ cue2flac/
 pip install "pyinstaller==6.22.3"
 pyinstaller --noconfirm --onefile --name cue2flac ^
   --hidden-import cue2flac ^
+  --hidden-import cue2flac._util ^
   --hidden-import cue2flac.cli ^
   --hidden-import cue2flac.cue_parser ^
   --hidden-import cue2flac.splitter ^
@@ -533,7 +535,7 @@ pyinstaller --noconfirm --onefile --name cue2flac ^
   main.py
 ```
 
-> 注意：`--hidden-import` 必须包含 `config` / `verify` / `layout` / `convert` / `dsd` 等所有被动态导入或反射引用的子模块，否则打包后运行会因找不到模块而报错（缺少 `convert` 会导致「不依赖 CUE 的直接转换」功能在 exe 中不可用，缺少 `dsd` 会导致 DSD 源处理失败）。ffmpeg/ffprobe 通过 `--add-binary` 内嵌到 `ffmpeg/` 子目录下，由 `ffmpeg_provider.resolve_tool` 在运行时定位。
+> 注意：`--hidden-import` 必须包含 `_util` / `config` / `verify` / `layout` / `convert` / `dsd` 等所有被动态导入或反射引用的子模块，否则打包后运行会因找不到模块而报错（缺少 `convert` 会导致「不依赖 CUE 的直接转换」功能在 exe 中不可用，缺少 `dsd` 会导致 DSD 源处理失败）。ffmpeg/ffprobe 通过 `--add-binary` 内嵌到 `ffmpeg/` 子目录下，由 `ffmpeg_provider.resolve_tool` 在运行时定位。
 
 ---
 

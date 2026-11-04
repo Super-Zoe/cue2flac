@@ -15,7 +15,12 @@ from .cue_parser import CueSheet, Track
 from .dsd import DSD_EXTS as _DSD_EXTS, DSD_CODECS as _DSD_CODECS
 from .dsd import dsd_plan, dsd_args_from_plan
 from .ffmpeg_provider import resolve_tool
-from .verify import verify_outputs, format_verification_report
+from .verify import probe_audio, verify_outputs, format_verification_report
+from ._util import (
+    AUDIO_HINT_EXTS as _AUDIO_EXTS,
+    run_ffmpeg as _run_ffmpeg_impl,
+    sample_fmt_for_bits,
+)
 
 
 class SplitterError(RuntimeError):
@@ -50,44 +55,6 @@ def _is_dsd(audio_path: str, ffprobe: str) -> bool:
     return False
 
 
-def _detect_sample_fmt(audio_path: str, ffprobe: str) -> str:
-    """探测源文件位深，返回 ffmpeg 的 -sample_fmt 取值（未知则返回空串）。
-
-    注意：FLAC 编码器只接受 ``s16`` 与 ``s32`` 两种采样格式，因此 24bit 源必须
-    映射为 ``s32``（容器用 32 位承载 24 位有效数据，FLAC 会把
-    ``bits_per_raw_sample`` 记为 24，音频数据依然逐样本无损）。
-    若误传 ``s24``，ffmpeg 会直接报 "Invalid sample format 's24'" 而转换失败。
-    """
-    try:
-        out = subprocess.run(
-            [
-                ffprobe,
-                "-v",
-                "error",
-                "-select_streams",
-                "a:0",
-                "-show_entries",
-                "stream=bits_per_raw_sample,bits_per_sample",
-                "-of",
-                "default=nw=1:nk=1",
-                audio_path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        ).stdout
-        for line in out.splitlines():
-            line = line.strip()
-            if line.isdigit():
-                bits = int(line)
-                if bits in (8, 16, 24, 32):
-                    # FLAC 编码器仅支持 s16 / s32：24bit 用 s32 承载
-                    return "s16" if bits <= 16 else "s32"
-    except Exception:
-        pass
-    return ""
-
-
 def _missing_audio_hint(audio_path: str) -> str:
     """音频缺失时，列出同目录下的候选音频文件，便于用户快速定位。"""
     d = os.path.dirname(os.path.abspath(audio_path)) if audio_path else ""
@@ -106,13 +73,6 @@ def _missing_audio_hint(audio_path: str) -> str:
     shown = entries[:8]
     extra = f" 等 {len(entries)} 个文件" if len(entries) > len(shown) else ""
     return "同目录下的音频文件：" + "、".join(shown) + extra
-
-
-# 常见整轨音频扩展名（用于缺失提示与格式判定）
-_AUDIO_EXTS = (
-    ".flac", ".wav", ".wv", ".ape", ".tta", ".tak", ".m4a",
-    ".dsf", ".dff", ".aiff", ".aif", ".alac", ".mp3", ".ogg", ".opus",
-)
 
 
 def _safe_name(tr: Track) -> str:
@@ -134,13 +94,16 @@ def _safe_name(tr: Track) -> str:
 
 
 def _run_ffmpeg(cmd, on_progress=None):
-    if on_progress:
-        on_progress("  $ " + " ".join(cmd) + "\n")
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        err = proc.stderr.strip() or proc.stdout.strip()
-        raise SplitterError(f"ffmpeg 执行失败（退出码 {proc.returncode}）：\n{err[:2000]}")
-    return proc
+    """兼容别名：公共实现见 :func:`cue2flac._util.run_ffmpeg`。
+
+    保留分轨链路原有的 ``stderr.strip() or stdout.strip()`` 错误提取口径
+    与 ``"  $ <cmd>"`` 进度回显。
+    """
+    return _run_ffmpeg_impl(
+        cmd, SplitterError,
+        on_progress=on_progress,
+        err_picker=lambda p: (p.stderr or "").strip() or (p.stdout or "").strip(),
+    )
 
 
 def split(
@@ -156,6 +119,7 @@ def split(
     ffprobe = resolve_tool("ffprobe")
     os.makedirs(out_dir, exist_ok=True)
     sample_fmt = ""
+    probed = False
     total = sheet.total_tracks
     results: List[str] = []
 
@@ -192,8 +156,14 @@ def split(
                 + (f"{hint}\n" if hint else "")
                 + f"请用 --audio 指定正确的整轨音频文件。"
             )
-        if not sample_fmt and not is_dsd:
-            sample_fmt = _detect_sample_fmt(tr.file, ffprobe)
+        if not is_dsd and not probed:
+            # 位深只探测一次；映射规则与直转链路共用 _util.sample_fmt_for_bits。
+            # strict=True 保留分轨原有语义：未知位深时返回空串 = 不传 -sample_fmt。
+            probed = True
+            params = probe_audio(tr.file, ffprobe) or {}
+            sample_fmt = sample_fmt_for_bits(
+                int(params.get("bits") or 0), strict=True
+            )
 
         out_name = _safe_name(tr) + ".flac"
         out_path = os.path.join(out_dir, out_name)

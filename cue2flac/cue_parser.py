@@ -11,6 +11,8 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from ._util import AUDIO_HINT_EXTS as _AUDIO_EXTS, EXT_FALLBACK as _EXT_FALLBACK
+
 # CDDA 红皮书标准：每秒 75 帧
 CD_FRAMES_PER_SEC = 75
 
@@ -78,16 +80,8 @@ def _parse_time(s: str) -> float:
 
 _QUOTED = re.compile(r'^"(.*)"$')
 
-# 常见整轨音频扩展名（用于模糊定位音源时的候选筛选）
-_AUDIO_EXTS = (
-    ".flac", ".wav", ".wv", ".ape", ".tta", ".tak", ".m4a",
-    ".dsf", ".dff", ".aiff", ".aif", ".alac", ".mp3", ".ogg", ".opus",
-)
-
-# 扩展名回退顺序：当 CUE 的 FILE 行省略扩展名时依次尝试
-_EXT_FALLBACK = (
-    ".flac", ".wav", ".wv", ".ape", ".tta", ".tak", ".m4a", ".dsf", ".dff", "",
-)
+# 音频扩展名清单（候选筛选 / FILE 行回退顺序）统一定义在 cue2flac._util，
+# 由 SUPPORTED_EXTS 派生，见模块顶部导入。
 
 
 def _unquote(s: str) -> str:

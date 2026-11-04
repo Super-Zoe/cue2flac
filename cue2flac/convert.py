@@ -31,22 +31,21 @@ from typing import Callable, List, Optional
 from .ffmpeg_provider import resolve_tool
 from .verify import probe_audio, verify_output, SourceContext, format_param_line
 from .dsd import dsd_args_from_plan, dsd_plan, is_dsd
-
-# ---------------------------------------------------------------------------
-# 格式常量
-# ---------------------------------------------------------------------------
-
-#: 支持直接转换的输入扩展名（小写，含点）。
-SUPPORTED_EXTS = (
-    # PCM 系无损
-    ".flac", ".wav", ".ape", ".wv", ".tta", ".tak",
-    ".alac", ".m4a", ".aiff", ".aif", ".pcm", ".sf",
-    # DSD 系
-    ".dsf", ".dff",
+from ._util import (
+    DSD_EXTS as _DSD_EXTS,
+    SUPPORTED_EXTS,          # 单一真源，保持本模块的公开导出名不变
+    run_ffmpeg,
+    sample_fmt_for_bits,
+    sanitize_name,
+    unique_name,
 )
 
-#: DSD（1-bit）容器扩展名。
-DSD_EXTS = (".dsf", ".dff")
+# ---------------------------------------------------------------------------
+# 格式常量：定义在 cue2flac._util，本模块 re-export 以保持对外接口兼容
+# ---------------------------------------------------------------------------
+
+#: DSD 容器扩展名（兼容旧导出；单一真源在 _util，不再单独维护一份）。
+DSD_EXTS = _DSD_EXTS
 
 
 class ConvertError(RuntimeError):
@@ -95,24 +94,13 @@ def is_supported_audio(path: str) -> bool:
 
 
 def _sanitize(name: str) -> str:
-    """把文件名整理为安全的输出名（不含扩展名）。"""
-    name = (name or "").strip()
-    for ch in '\\/:*?"<>|\r\n\t':
-        name = name.replace(ch, "_")
-    name = name.strip(" ._")
-    if not name:
-        name = "output"
-    return name[:120]
+    """兼容别名：实现见 :func:`cue2flac._util.sanitize_name`。"""
+    return sanitize_name(name)
 
 
 def _unique_path(path: str, used: dict) -> str:
-    """同一批处理内避免输出文件重名。"""
-    if path not in used:
-        used[path] = 0
-        return path
-    used[path] += 1
-    base, ext = os.path.splitext(path)
-    return f"{base}_{used[path]}{ext}"
+    """兼容别名：同批重名时后缀加在扩展名前。"""
+    return unique_name(path, used, in_stem=True)
 
 
 def _copy_tags(src: str, dst: str, ff: str, tags: Optional[dict] = None) -> None:
@@ -163,11 +151,8 @@ def _copy_tags(src: str, dst: str, ff: str, tags: Optional[dict] = None) -> None
 
 
 def _run(cmd: List[str]) -> None:
-    """执行 ffmpeg，失败时抛出带错误输出的异常。"""
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "").strip()
-        raise ConvertError(f"ffmpeg 执行失败（退出码 {proc.returncode}）：\n{err[:2000]}")
+    """兼容别名：执行 ffmpeg，失败时抛出带错误输出的 ConvertError。"""
+    run_ffmpeg(cmd, ConvertError)
 
 
 def convert_file(
@@ -265,8 +250,8 @@ def convert_file(
                 cmd += ["-ar", str(src_rate)]
             res.note = "源文件已是 FLAC，采用流拷贝（未重新编码）。"
         elif bits:
-            # FLAC 编码器只接受 s16 / s32：24bit 用 s32 承载
-            cmd += ["-sample_fmt", "s16" if bits <= 16 else "s32"]
+            # FLAC 编码器只接受 s16 / s32：24bit 用 s32 承载（统一映射见 _util）
+            cmd += ["-sample_fmt", sample_fmt_for_bits(bits)]
 
     if copy_cover:
         cmd += ["-map", "0:v:0?", "-c:v", "copy"]

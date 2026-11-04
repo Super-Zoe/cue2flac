@@ -252,6 +252,23 @@ def test_hidden_imports_include_dsd_module():
     assert "--hidden-import cue2flac.dsd" in runs, "打包缺少 cue2flac.dsd 的 hidden-import"
 
 
+def test_hidden_imports_include_shared_util_module():
+    """公共工具模块 cue2flac._util 必须显式列入打包清单。
+
+    回归防护：转换 / 分轨 / 批量 / GUI 都从 _util 取格式常量与工具函数。
+    PyInstaller 只做静态分析，漏掉 hidden-import 会让 exe 在运行时
+    抛 ModuleNotFoundError，而源码模式与 CI 冒烟都不一定能发现。
+    """
+    data = _load()
+    runs = "\n".join(
+        str(step.get("run", ""))
+        for job in data["jobs"].values()
+        for step in job.get("steps", [])
+    )
+    assert "--hidden-import cue2flac._util" in runs, \
+        "打包缺少 cue2flac._util 的 hidden-import"
+
+
 def test_ci_tool_paths_exist_in_workspace_root():
     """CI 步骤里调用的 ffmpeg / ffprobe 必须用仓库根目录的相对路径。
 

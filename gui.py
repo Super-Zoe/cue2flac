@@ -29,13 +29,18 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from cue2flac.cue_parser import parse_cue
-from cue2flac.batch import process_cues, expand_to_inputs
+from cue2flac.batch import (
+    process_cues,
+    expand_to_inputs,
+    get_cached_sheet,
+)
 from cue2flac.config import get_out_dir, set_out_dir
 from cue2flac.convert import (
     SUPPORTED_EXTS,
     convert_files,
     format_convert_summary,
 )
+from cue2flac._util import audio_file_patterns
 from cue2flac.layout import plan_rows
 
 # 拖放为 Windows 原生实现（零依赖）；非 Windows 下 enable_drop 自动空操作。
@@ -78,6 +83,9 @@ class App(tk.Tk):
         self._cue_map: dict[str, str] = {}
         # 结果树中「直转音频行」的 iid → 对应音频绝对路径
         self._audio_map: dict[str, str] = {}
+        # CUE 解析结果缓存：拖入 → 列表展示 → 开始转换 三个阶段复用同一次解析
+        # （batch.get_cached_sheet 会按 size/mtime 校验，文件被改动时自动失效）
+        self._sheet_cache: dict = {}
         # 用户指定的统一输出目录（None = 使用内置默认：各 CUE 所在目录下的专辑名子文件夹）
         self.out_dir: Optional[str] = get_out_dir()
 
@@ -408,7 +416,7 @@ class App(tk.Tk):
             title="选择 .cue 文件或可直接转换的音频文件（可多选）",
             filetypes=[
                 ("CUE 文件", "*.cue"),
-                ("无损音频", "*.flac *.wav *.ape *.wv *.tta *.tak *.alac *.aiff *.dsf *.dff"),
+                ("无损音频", audio_file_patterns()),
                 ("所有文件", "*.*"),
             ],
         )
@@ -439,7 +447,9 @@ class App(tk.Tk):
     def _on_drop(self, paths: List[str]) -> None:
         """拖入文件 / 文件夹后：解析路径 → 收集 .cue 与可直接转换的音频 → 列出结果。"""
         self._highlight(False)
-        cues, audios = expand_to_inputs(paths, recursive=True)
+        cues, audios = expand_to_inputs(
+            paths, recursive=True, sheet_cache=self._sheet_cache
+        )
         if not cues and not audios:
             self._flash(INVALID_COLOR)
             self.status_label.config(text="未找到 .cue 文件或可转换的音频")
@@ -478,7 +488,10 @@ class App(tk.Tk):
 
         for cue in cues:
             try:
-                sheet = parse_cue(cue)
+                # 复用拖入阶段已解析的 CueSheet；缓存失效时回退到重新解析。
+                sheet = get_cached_sheet(cue, self._sheet_cache)
+                if sheet is None:
+                    sheet = parse_cue(cue)
             except Exception as e:  # noqa: BLE001
                 # 解析失败也列出，清晰标注，便于排查
                 self.tree.insert(
@@ -582,6 +595,7 @@ class App(tk.Tk):
                     copy_cover=True,
                     verify=True,  # 逐文件校验：可播放 / 采样率 / 位深 / 声道数 / 帧数 / 时长 / PCM 一致
                     on_progress=self.log,
+                    sheets=self._sheet_cache,
                 )
 
             # ② 不依赖 CUE 的直接转换
@@ -652,6 +666,7 @@ class App(tk.Tk):
         self.batch_audio_paths = []
         self._cue_map.clear()
         self._audio_map.clear()
+        self._sheet_cache.clear()
         self.btn_convert.config(state="disabled")
         self.btn_delete.config(state="disabled")
         self.status_label.config(text="等待拖入或选择…")

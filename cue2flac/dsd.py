@@ -33,9 +33,7 @@ from typing import Dict, List, Optional, Tuple
 
 from .ffmpeg_provider import resolve_tool
 from .verify import probe_audio
-
-#: DSD 容器扩展名。
-DSD_EXTS = (".dsf", ".dff")
+from ._util import DSD_EXTS  # 单一真源，保持 dsd.DSD_EXTS 的导出名不变
 
 #: ffmpeg 的 DSD 解码器名。
 DSD_CODECS = (

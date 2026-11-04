@@ -84,6 +84,7 @@ jobs:
         run: |
           pyinstaller --noconfirm --onefile --name cue2flac `
             --hidden-import cue2flac `
+            --hidden-import cue2flac._util `
             --hidden-import cue2flac.cli `
             --hidden-import cue2flac.cue_parser `
             --hidden-import cue2flac.splitter `

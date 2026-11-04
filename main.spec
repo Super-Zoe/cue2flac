@@ -13,6 +13,7 @@ a = Analysis(
     datas=[],
     hiddenimports=[
         "cue2flac",
+        "cue2flac._util",
         "cue2flac.cli",
         "cue2flac.cue_parser",
         "cue2flac.splitter",

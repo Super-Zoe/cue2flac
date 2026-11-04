@@ -21,6 +21,7 @@ from .convert import (
     convert_files,
     format_convert_summary,
 )
+from ._util import sanitize_name, unique_name
 
 #: 分轨输出文件名特征：``NN. 标题``（见 splitter._safe_name）。
 #: 用于识别「程序自己生成的分轨产物」，避免重复扫描时把输出再当母带转换。
@@ -63,6 +64,36 @@ class BatchResult:
     @property
     def skip_count(self) -> int:
         return len(self.skipped)
+
+
+def _sheet_stamp(path: str) -> Tuple[int, int]:
+    """CUE 文件的 (size, mtime_ns)，用于判定解析缓存是否过期。"""
+    try:
+        st = os.stat(path)
+        return (st.st_size, st.st_mtime_ns)
+    except OSError:
+        return (-1, -1)
+
+
+def get_cached_sheet(cue: str, sheets: Optional[dict]):
+    """从解析缓存里取出仍有效的 ``CueSheet``；无有效条目时返回 None。
+
+    缓存值约定为 ``(stamp, sheet)``；若调用方直接放入 ``CueSheet``，
+    也按「不再校验时间戳」的宽松方式兼容。这样「拖入 → 展示 → 开始转换」
+    三个阶段可以复用同一次 ``parse_cue``，而用户中途改动 CUE 时
+    （size / mtime 变化）会自动失效并重解析，不会用到陈旧快照。
+    """
+    if not sheets:
+        return None
+    entry = sheets.get(os.path.abspath(cue))
+    if entry is None:
+        return None
+    if isinstance(entry, tuple) and len(entry) == 2:
+        stamp, sheet = entry
+        if stamp != _sheet_stamp(cue):
+            return None
+        return sheet
+    return entry
 
 
 def _walk_files(
@@ -166,6 +197,7 @@ def expand_to_inputs(
     paths: List[str],
     recursive: bool = True,
     audio_hint: Optional[str] = None,
+    sheet_cache: Optional[dict] = None,
 ) -> Tuple[List[str], List[str]]:
     """把一组拖入的路径展开为 (cue 列表, 待直转音频列表)。
 
@@ -177,6 +209,10 @@ def expand_to_inputs(
     不一致（例如 CUE 写 ``Album.ape``、磁盘上是 ``Album-master.ape``），
     解析结果才是真实被消费的那一个。不传时会把该母带误判为「未被引用」，
     导致既分轨又直转、输出重复。
+
+    ``sheet_cache`` 可选：把本次已解析成功的 CUE 结果按绝对路径写入，
+    供 ``process_cues`` / GUI 展示层复用，避免同一 CUE 被解析 2~3 次。
+    不传时行为与原来完全一致，**返回值结构始终是 ``(cues, audios)``**。
     """
     cues = expand_to_cues(paths, recursive=recursive)
 
@@ -190,6 +226,8 @@ def expand_to_inputs(
             sheet = parse_cue(cue, audio_hint=audio_hint)
         except Exception:  # noqa: BLE001
             continue
+        if sheet_cache is not None:
+            sheet_cache[os.path.abspath(cue)] = (_sheet_stamp(cue), sheet)
         for tr in sheet.tracks:
             if tr.file:
                 referenced.add(os.path.abspath(tr.file))
@@ -232,23 +270,13 @@ def expand_to_inputs(
 
 
 def _sanitize(name: str) -> str:
-    """把专辑名 / 文件名整理为安全的目录名。"""
-    name = (name or "").strip()
-    for ch in '\\/:*?"<>|\r\n\t':
-        name = name.replace(ch, "_")
-    name = name.strip(" ._")
-    if not name:
-        name = "output"
-    return name[:120]
+    """兼容别名：实现见 :func:`cue2flac._util.sanitize_name`。"""
+    return sanitize_name(name)
 
 
 def _unique_out_dir(base: str, used: dict) -> str:
-    """在同一批处理内避免输出目录重名（同名专辑分别落子文件夹）。"""
-    if base not in used:
-        used[base] = 0
-        return base
-    used[base] += 1
-    return f"{base}_{used[base]}"
+    """兼容别名：同名专辑分别落 ``album_1`` / ``album_2`` 子文件夹。"""
+    return unique_name(base, used)
 
 
 def process_cues(
@@ -258,6 +286,7 @@ def process_cues(
     copy_cover: bool = True,
     verify: bool = False,
     on_progress: Optional[Callable[[str], None]] = None,
+    sheets: Optional[dict] = None,
 ) -> BatchResult:
     """处理一个明确的 CUE 路径列表（已由调用方发现 / 收集）。
 
@@ -272,6 +301,9 @@ def process_cues(
       copy_cover —— 是否复制封面
       verify     —— 是否逐样本校验无损
       on_progress—— 进度回调（接受一段文本）
+      sheets     —— 可选的已解析 CUE 缓存（见 :func:`get_cached_sheet`）。
+                    **不传时行为与原来完全一致**：逐个 ``parse_cue``。
+                    解析失败或缓存过期的 CUE 会重新解析并照常记为 skipped。
     """
     result = BatchResult()
     result.scanned = len(cue_paths)
@@ -286,8 +318,11 @@ def process_cues(
             on_progress(f"\n=== [{idx}/{len(cue_paths)}] {os.path.basename(cue)} ===\n")
 
         # 1) 解析（格式错误 / 编码异常在此捕获并跳过）
+        #    优先复用前面 expand_to_inputs 已解析且仍未过期的结果。
         try:
-            sheet = parse_cue(cue, audio_hint=audio_hint)
+            sheet = get_cached_sheet(cue, sheets)
+            if sheet is None:
+                sheet = parse_cue(cue, audio_hint=audio_hint)
         except Exception as e:  # noqa: BLE001
             result.skipped.append(SkippedItem(cue, f"解析失败：{e}"))
             if on_progress:
@@ -378,6 +413,7 @@ def process_all(
     copy_cover: bool = True,
     verify: bool = False,
     on_progress: Optional[Callable[[str], None]] = None,
+    sheet_cache: Optional[dict] = None,
 ) -> Tuple[BatchResult, List]:
     """混合处理：一次调用里既做 CUE 分轨，也做不依赖 CUE 的音频直转。
 
@@ -386,9 +422,13 @@ def process_all(
     - 其它音频文件      → 整轨直接转成一个 FLAC。
 
     返回 (分轨结果, 直转结果列表)。
+
+    ``sheet_cache`` 不传时内部自建一份，使「展开输入 → 分轨」两个阶段
+    复用同一次 CUE 解析；调用方也可传入自己的 dict 与 GUI 展示层共享。
     """
+    sheets = sheet_cache if sheet_cache is not None else {}
     cues, audios = expand_to_inputs(
-        paths, recursive=recursive, audio_hint=audio_hint
+        paths, recursive=recursive, audio_hint=audio_hint, sheet_cache=sheets
     )
 
     # 只有确实存在 CUE 时才进入分轨流程——否则 process_cues 会打印
@@ -402,6 +442,7 @@ def process_all(
             copy_cover=copy_cover,
             verify=verify,
             on_progress=on_progress,
+            sheets=sheets,
         )
     else:
         result = BatchResult()

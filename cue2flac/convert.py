@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import tempfile
@@ -46,6 +47,11 @@ from ._util import (
 
 #: DSD 容器扩展名（兼容旧导出；单一真源在 _util，不再单独维护一份）。
 DSD_EXTS = _DSD_EXTS
+
+_log = logging.getLogger(__name__)
+
+#: ffmetadata 中必须转义的字符（反斜杠、等号、分号、井号、换行）。
+_FFMETA_SPECIAL = "\\=;#\n"
 
 
 class ConvertError(RuntimeError):
@@ -103,51 +109,107 @@ def _unique_path(path: str, used: dict) -> str:
     return unique_name(path, used, in_stem=True)
 
 
-def _copy_tags(src: str, dst: str, ff: str, tags: Optional[dict] = None) -> None:
+def _escape_ffmeta(value: str) -> str:
+    """按 FFmpeg ffmetadata 规则转义 ``=`` ``;`` ``#`` ``\\`` 与换行。
+
+    ffmetaenc 会在这些字符前加一个反斜杠；ffmetadec 读到反斜杠时把
+    下一个字符原样放入值。键不做转义（见 :func:`_ffmetadata_lines`）。
+    """
+    out = []
+    for ch in value:
+        if ch in _FFMETA_SPECIAL:
+            out.append("\\")
+        out.append(ch)
+    return "".join(out)
+
+
+def _ffmetadata_lines(tags: dict) -> List[str]:
+    """把 ffprobe 的 ``format_tags`` 转成合法的 ffmetadata 键值行。
+
+    - 文件头 ``;FFMETADATA1`` 由调用方在循环外**只写一次**；
+    - 键含 ffmetadata 特殊字符、控制字符或为空时跳过该条（键无转义规则，
+      写进去会破坏后续所有行的解析）；
+    - 值里的 CRLF / CR 先归一化为 LF，再按规范转义；
+    - 空值跳过，与原有 ``if v:`` 行为一致。
+    """
+    lines: List[str] = []
+    for k, v in (tags or {}).items():
+        if not v:
+            continue
+        key = str(k).strip()
+        if not key or any(c in key for c in _FFMETA_SPECIAL) or "\r" in key:
+            _log.debug("跳过非法 ffmetadata 键：%r", k)
+            continue
+        val = str(v).replace("\r\n", "\n").replace("\r", "\n")
+        lines.append(f"{key}={_escape_ffmeta(val)}")
+    return lines
+
+
+def _copy_tags(src: str, dst: str, ff: str, tags: Optional[dict] = None,
+               ffprobe: Optional[str] = None) -> None:
     """把源文件的元数据（标题/表演者/专辑等）复制到输出 FLAC。
 
     用 ffmetadata 中转：ffprobe 导出 → ffmpeg 导入。
-    失败不影响转换本身（标签只是附加信息）。
+    **失败不影响转换本身**（标签只是附加信息），但会写 debug 日志，
+    且 ffmpeg 返回非 0 / 未生成有效文件时绝不覆盖已有输出。
 
     ``tags`` 由调用方传入时（来自同一次流探测的 ``format_tags``），
-    直接复用，不再单独启动一次 ffprobe；不传时保持原来的自行探测行为。
+    直接复用，不再单独启动一次 ffprobe；``ffprobe`` 同理可复用调用方
+    已定位的可执行文件，避免重复 ``resolve_tool``。两者都不传时保持
+    原来的自行探测行为。
     """
     try:
         if tags is None:
+            probe = ffprobe or resolve_tool("ffprobe")
             meta = subprocess.run(
-                [ffprobe, "-v", "error", "-show_entries", "format_tags",
+                [probe, "-v", "error", "-show_entries", "format_tags",
                  "-of", "json", src],
                 capture_output=True, text=True, timeout=60,
-            ) if (ffprobe := resolve_tool("ffprobe")) else None
-            if meta is None or meta.returncode != 0:
+            )
+            if meta.returncode != 0:
+                _log.debug("ffprobe 读取标签失败（%s），跳过元数据复制", src)
                 return
             tags = (json.loads(meta.stdout).get("format", {}) or {}).get("tags", {})
-        if not tags:
+        lines = _ffmetadata_lines(tags or {})
+        if not lines:
             return
+        # newline="\n" 关键：Windows 文本模式默认把 \n 写成 \r\n，会让
+        # ffmetadata 的「反斜杠 + 换行」转义变成「反斜杠 + \r」，值被截断。
+        # FFmpeg 自己导出的 ffmetadata 也一律使用 LF 行尾。
         with tempfile.NamedTemporaryFile(
-            "w", suffix=".ffmeta", encoding="utf-8", delete=False
+            "w", suffix=".ffmeta", encoding="utf-8", delete=False,
+            newline="\n",
         ) as f:
-            for k, v in tags.items():
-                if v:
-                    f.write(f";FFMETADATA1\n{k}={v}\n")
+            f.write(";FFMETADATA1\n")
+            f.write("\n".join(lines) + "\n")
             meta_path = f.name
+        tmp = dst + ".tmp.flac"
         try:
-            subprocess.run(
+            cp = subprocess.run(
                 [ff, "-v", "error", "-y", "-i", dst, "-i", meta_path,
-                 "-map_metadata", "1", "-c:a", "copy", "-f", "flac",
-                 dst + ".tmp.flac"],
+                 "-map_metadata", "1", "-c:a", "copy", "-f", "flac", tmp],
                 capture_output=True, text=True, timeout=600,
             )
-            if os.path.isfile(dst + ".tmp.flac"):
-                os.replace(dst + ".tmp.flac", dst)
+            if cp.returncode != 0:
+                _log.debug(
+                    "ffmetadata 写入失败，保留原输出：%s",
+                    (cp.stderr or "").strip()[:500],
+                )
+                return
+            if not os.path.isfile(tmp) or os.path.getsize(tmp) == 0:
+                _log.debug("ffmetadata 未生成有效输出，保留原文件")
+                return
+            os.replace(tmp, dst)
         finally:
-            if os.path.isfile(meta_path):
-                os.remove(meta_path)
-            tmp = dst + ".tmp.flac"
-            if os.path.isfile(tmp):
-                os.remove(tmp)
-    except Exception:
-        pass
+            for leftover in (meta_path, tmp):
+                try:
+                    if os.path.isfile(leftover):
+                        os.remove(leftover)
+                except OSError:
+                    _log.debug("清理临时文件失败：%s", leftover, exc_info=True)
+    except Exception as e:  # noqa: BLE001
+        # 标签复制属于附加功能；任何异常都不得影响已经生成的 FLAC。
+        _log.debug("复制元数据失败（不影响转换）：%s", e, exc_info=True)
 
 
 def _run(cmd: List[str]) -> None:
@@ -272,8 +334,8 @@ def convert_file(
         res.errors.append("未生成有效的输出文件")
         return res
 
-    # 复制元数据（失败不影响主流程）
-    _copy_tags(src, out_path, ff, src_tags)
+    # 复制元数据（失败不影响主流程）；复用同一次探测的 tags 与已定位的 ffprobe
+    _copy_tags(src, out_path, ff, src_tags, ffprobe)
 
     res.out_path = out_path
 

@@ -1,3 +1,4 @@
-# 构建依赖（仅用于打包 exe）
-# 固定版本，与 CI（.github/workflows/build.yml）保持一致，避免构建行为漂移
+# 打包依赖：PyInstaller 版本的唯一来源（CI 与本地打包共用）
+# 固定版本，禁止 >= / latest / 浮动标签，避免构建行为漂移
+# CI 通过 "pip install -r requirements.txt" 安装；升级只需改本文件
 pyinstaller==6.22.3

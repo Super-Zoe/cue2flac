@@ -468,13 +468,16 @@ cue2flac/
 ├── dnd.py                 # Windows 原生拖放支持（COM IDropTarget + ctypes，零依赖）
 ├── main.py                # 程序入口（有参数走 CLI，否则启动 GUI；双击自动隐藏黑框）
 ├── main.spec              # PyInstaller 规格（本地打包参考）
-├── requirements.txt       # 运行/开发依赖
+├── requirements.txt       # 打包依赖版本（PyInstaller，唯一来源）
+├── requirements-ci.txt    # CI 测试依赖版本（pytest / PyYAML，唯一来源）
 ├── tests/                 # 单元测试与 GUI 冒烟测试
 │   ├── test_cue_parser.py
 │   ├── test_batch.py
 │   ├── test_convert.py    # 直转测试（位深保持 / 无损 MD5 实证；需 ffmpeg）
-│   ├── test_dsd.py       # DSD 分轨/直转测试（.dsf/.dff 端到端；需 ffmpeg）
-│   ├── dsd_fixtures.py   # 构造真实 DSF / DFF 容器（ffmpeg 无 DSD 封装器）
+│   ├── test_copy_tags.py  # ffmetadata 转义 / 失败不覆盖输出（纯逻辑）
+│   ├── test_splitter.py   # DSD 判定统一实现（兼容别名 / 探测复用）
+│   ├── test_dsd.py        # DSD 分轨/直转测试（.dsf/.dff 端到端；需 ffmpeg）
+│   ├── dsd_fixtures.py    # 构造真实 DSF / DFF 容器（ffmpeg 无 DSD 封装器）
 │   ├── test_verify.py
 │   ├── test_layout.py
 │   ├── test_workflow.py   # CI 工作流静态校验（YAML / PowerShell 语法）
@@ -502,19 +505,19 @@ cue2flac/
 
 > **CI 依赖版本已全部固定**（不使用 `latest`、浮动标签或动态解析），构建结果可复现：
 >
-> | 依赖 | 固定版本 |
+> | 依赖 | 版本声明位置 |
 > |---|---|
-> | ffmpeg / ffprobe | `N-128352-gec887b13a8`（BtbN tag `autobuild-2026-11-03-12-50`，下载后校验 SHA256） |
-> | Python | `3.11.9`（runner：`windows-2025`） |
-> | PyInstaller | `6.22.3` |
-> | pytest / PyYAML | `9.2.0` / `6.0.3` |
-> | pip | `26.3` |
+> | ffmpeg / ffprobe | `build.yml` 的 `FFMPEG_TAG` / `FFMPEG_BUILD`（`autobuild-2026-11-03-12-50` / `N-128352-gec887b13a8`，下载后校验 SHA256） |
+> | Python / runner | `build.yml`（`3.11.9` / `windows-2025`） |
+> | pip | `build.yml`（`26.3`，pip 自身升级须写在命令行） |
+> | PyInstaller | `requirements.txt`（唯一来源） |
+> | pytest / PyYAML | `requirements-ci.txt`（唯一来源） |
 > | GitHub Actions | `checkout@11d5960a` (v4.4.0)、`setup-python@a26af69b` (v5.6.0)、`upload-artifact@ea165f8d` (v4.6.2)，均锁定到 commit SHA |
 >
-> 升级其中任一项时，请同步修改 `.github/workflows/build.yml` 中的对应版本号与 SHA256 校验值。
+> **Python 包版本的唯一来源是 `requirements.txt` 与 `requirements-ci.txt`**，CI 用 `pip install -r` 安装，不再在工作流与 README 里重复写版本号；升级只需改这两个文件，工作流 `paths` 已包含 `requirements*.txt`，会自动触发重新构建。升级 ffmpeg / Python / Actions 时，修改 `.github/workflows/build.yml` 中的对应版本号与 SHA256 校验值。
 
 ```bash
-pip install "pyinstaller==6.22.3"
+pip install -r requirements.txt
 pyinstaller --noconfirm --onefile --name cue2flac ^
   --hidden-import cue2flac ^
   --hidden-import cue2flac._util ^
@@ -542,12 +545,12 @@ pyinstaller --noconfirm --onefile --name cue2flac ^
 ## 开发与测试
 
 ```bash
-pip install -r requirements.txt   # 打包依赖（pyinstaller==6.22.3）
-pip install "pytest==9.2.0" "pyyaml==6.0.3"   # 测试依赖
+pip install -r requirements.txt      # 打包依赖（PyInstaller）
+pip install -r requirements-ci.txt  # 测试依赖（pytest / PyYAML）
 python -m pytest -q                # 运行全部测试
 ```
 
-- `tests/test_cue_parser.py`、`test_batch.py`、`test_verify.py`、`test_splitter.py`：纯逻辑单测，无需界面即可运行。
+- `tests/test_cue_parser.py`、`test_batch.py`、`test_verify.py`、`test_splitter.py`、`test_copy_tags.py`：纯逻辑单测，无需界面即可运行。
 - `tests/test_layout.py`：按钮折行算法的纯函数测试。
 - `tests/test_gui_smoke.py`：GUI 布局冒烟（构造窗口、控件可见性、缩窄不裁切、滚动条可驱动画布等）；**需要 tkinter 与显示环境**，无显示环境时自动跳过。
 - `tests/test_workflow.py`：工作流静态校验——YAML 可解析、步骤名无歧义冒号、`paths` 过滤未被误删、pwsh 步骤能被 PowerShell 解析器无错解析。

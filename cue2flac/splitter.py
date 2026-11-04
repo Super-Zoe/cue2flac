@@ -8,12 +8,11 @@
 from __future__ import annotations
 
 import os
-import subprocess
 from typing import List, Optional
 
 from .cue_parser import CueSheet, Track
-from .dsd import DSD_EXTS as _DSD_EXTS, DSD_CODECS as _DSD_CODECS
 from .dsd import dsd_plan, dsd_args_from_plan
+from .dsd import is_dsd as _is_dsd_shared
 from .ffmpeg_provider import resolve_tool
 from .verify import probe_audio, verify_outputs, format_verification_report
 from ._util import (
@@ -27,32 +26,19 @@ class SplitterError(RuntimeError):
     """分轨过程中的可预期错误。"""
 
 
-def _is_dsd(audio_path: str, ffprobe: str) -> bool:
-    """判断音源是否为 DSD（.dsf/.dff 容器，或 ffprobe 解码器为 dsd*）。
+def _is_dsd(audio_path: str, ffprobe: str, params: Optional[dict] = None) -> bool:
+    """兼容别名：DSD 判定统一由 :func:`cue2flac.dsd.is_dsd` 实现。
 
-    DSD 为 1-bit 编码，无法逐样本无损映射为 PCM/FLAC；此函数仅用于
+    DSD 为 1-bit 编码，无法逐样本无损映射为 PCM/FLAC；判定结果仅用于
     在转换时给出明确提示，并避免把 DSD 的“1 bit”误当成 PCM 位深。
+
+    历史上分轨链路自己拼 ffprobe 命令、用 ``DSD_CODECS`` 精确集合比对，
+    与直转链路的 ``codec.startswith("dsd")`` 口径不一致。现在两条链路
+    共用一份实现：按扩展名短路，或复用 ``probe_audio`` 得到的 codec。
+    同名、两参调用方式保持不变；``params`` 可传入已有探测结果以避免
+    重复启动 ffprobe（不传时行为与原来一致）。
     """
-    low = (audio_path or "").lower()
-    if low.endswith(_DSD_EXTS):
-        return True
-    try:
-        out = subprocess.run(
-            [
-                ffprobe, "-v", "error",
-                "-select_streams", "a:0",
-                "-show_entries", "stream=codec_name",
-                "-of", "default=nw=1:nk=1",
-                audio_path,
-            ],
-            capture_output=True, text=True, timeout=30,
-        ).stdout
-        for line in out.splitlines():
-            if line.strip().lower() in _DSD_CODECS:
-                return True
-    except Exception:  # noqa: BLE001
-        pass
-    return False
+    return _is_dsd_shared(audio_path, ffprobe, params)
 
 
 def _missing_audio_hint(audio_path: str) -> str:

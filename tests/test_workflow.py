@@ -6,6 +6,7 @@
 CI 直接 failure 且没有任何日志可查。本模块把这类错误提前拦在测试阶段。
 """
 
+import glob
 import os
 import re
 import shutil
@@ -380,22 +381,59 @@ def test_ffmpeg_download_is_pinned_to_exact_release():
     assert "BtbN/FFmpeg-Builds" in run, "ffmpeg 下载源被改动了，应保持 BtbN/FFmpeg-Builds"
 
 
+def _repo_root():
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _requirement_lines(path):
+    """读取 requirements 文件里的有效依赖行（跳过注释与空行）。"""
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if s and not s.startswith("#"):
+                yield s
+
+
 def test_python_dependencies_are_pinned():
-    """pip 安装的依赖必须锁定到具体版本，禁止不带版本号的裸包名。"""
+    """pip 安装的依赖必须锁定到具体版本，禁止不带版本号的裸包名。
+
+    第 4 批（P2-6）后 CI 改为 ``pip install -r requirements*.txt``，版本
+    声明集中到依赖文件里。本用例对 ``-r`` 引用的文件**逐行**校验 ``==``，
+    保证「集中声明」不等于「放松固定」；命令行上直接写的包（如 pip 自身
+    升级）仍按原口径检查。
+    """
     data = _load()
     runs = "\n".join(
         str(step.get("run", ""))
         for job in data["jobs"].values()
         for step in job.get("steps", [])
     )
-    # 所有 pip install 必须带 == 版本约束
     for line in runs.splitlines():
         s = line.strip()
         if "pip install" not in s:
             continue
+        # 拆出 "-r <file>" 对：文件名不含 ==，但文件里每一行都必须含 ==
+        tokens = s.split()
+        rest, refs = [], []
+        i = 0
+        while i < len(tokens):
+            if tokens[i] == "-r" and i + 1 < len(tokens):
+                refs.append(tokens[i + 1])
+                i += 2
+                continue
+            rest.append(tokens[i])
+            i += 1
+        for ref in refs:
+            path = os.path.join(_repo_root(), ref)
+            assert os.path.isfile(path), f"-r 引用的依赖文件不存在：{ref}"
+            for dep in _requirement_lines(path):
+                assert "==" in dep, f"{ref} 中的依赖未固定版本：{dep!r}"
+                assert ">" not in dep and "<" not in dep, (
+                    f"{ref} 中不应使用版本范围：{dep!r}"
+                )
         # 去掉 pip 自身的升级开关与 --upgrade 等选项
         args = [
-            a for a in s.split()
+            a for a in rest
             if not a.startswith("-")
             and a not in ("pip", "install", "python", "-m")
         ]
@@ -445,19 +483,52 @@ def test_runner_image_and_python_version_are_fixed():
 
 
 def test_requirements_txt_pins_pyinstaller():
-    """requirements.txt 里的打包依赖必须固定版本，避免与 CI 不一致。"""
-    req = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "requirements.txt",
+    """requirements.txt 必须固定 pyinstaller，作为打包依赖的唯一来源。"""
+    req = os.path.join(_repo_root(), "requirements.txt")
+    assert os.path.isfile(req), "缺少 requirements.txt"
+    deps = list(_requirement_lines(req))
+    assert any(d.startswith("pyinstaller==") for d in deps), \
+        "requirements.txt 未固定 pyinstaller 版本"
+
+
+def test_all_requirements_files_are_pinned():
+    """所有 requirements*.txt 都必须逐行固定版本（含 CI 测试依赖文件）。"""
+    files = sorted(glob.glob(os.path.join(_repo_root(), "requirements*.txt")))
+    assert files, "仓库缺少 requirements 文件"
+    for path in files:
+        for dep in _requirement_lines(path):
+            assert "==" in dep, (
+                f"{os.path.basename(path)} 中的依赖未固定版本：{dep!r}"
+            )
+            assert ">" not in dep and "<" not in dep, (
+                f"{os.path.basename(path)} 中不应使用版本范围：{dep!r}"
+            )
+
+
+def test_ci_installs_from_requirements_files():
+    """CI 用 -r 安装依赖，且不再硬编码包版本（避免版本重复声明）。
+
+    回归防护：历史上 pyinstaller/pytest/pyyaml 的版本同时写在 CI、
+    requirements.txt、README 多处，升级时漏改一处就会出现「声明与实际
+    不一致」。版本唯一来源必须是 requirements 文件。
+    """
+    data = _load()
+    runs = "\n".join(
+        str(step.get("run", ""))
+        for job in data["jobs"].values()
+        for step in job.get("steps", [])
     )
-    if not os.path.isfile(req):
-        pytest.skip("未找到 requirements.txt")
-    content = open(req, encoding="utf-8").read()
-    for line in content.splitlines():
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        assert "==" in s, f"requirements.txt 中的依赖未固定版本：{s!r}"
-        assert ">" not in s and "<" not in s, (
-            f"requirements.txt 中不应使用版本范围：{s!r}"
+    assert "-r requirements.txt" in runs, "CI 未从 requirements.txt 安装打包依赖"
+    assert "-r requirements-ci.txt" in runs, "CI 未从 requirements-ci.txt 安装测试依赖"
+    for pinned in ("pyinstaller==", "pytest==", "pyyaml=="):
+        assert pinned not in runs, (
+            f"CI 不应再硬编码 {pinned}，版本唯一来源是 requirements 文件"
         )
+
+
+def test_requirements_changes_trigger_build():
+    """依赖文件变动必须触发构建，否则升级版本后 CI 不会重新打包。"""
+    data = _load()
+    trigger = data.get("on", data.get(True))
+    assert "requirements*.txt" in trigger["push"]["paths"], \
+        "push 过滤缺少 requirements*.txt，依赖升级不会触发构建"

@@ -35,7 +35,10 @@ from .ffmpeg_provider import resolve_tool
 from .verify import probe_audio
 from ._util import DSD_EXTS  # 单一真源，保持 dsd.DSD_EXTS 的导出名不变
 
-#: ffmpeg 的 DSD 解码器名。
+#: ffmpeg 已知的 DSD 解码器名（单一真源，供文档 / 外部使用）。
+#:
+#: 判定本身用 ``codec.startswith("dsd")`` 而非精确集合比对：这样分轨与
+#: 直转共用一份口径，且上游新增 ``dsd_*`` 解码器时无需再改两处清单。
 DSD_CODECS = (
     "dsd", "dsd_lsbf", "dsd_msbf", "dsd_lsbf_planar", "dsd_msbf_planar",
 )
@@ -63,13 +66,20 @@ def is_dsd(src: str, ffprobe: Optional[str] = None,
 
     ``params`` 可由调用方传入已有的 :func:`~cue2flac.verify.probe_audio` 结果，
     避免同一文件被重复探测；不传时行为与原来完全一致。
+
+    分轨与直转两条链路都调用本函数（``splitter._is_dsd`` 是它的兼容别名），
+    以保证 DSD 判定口径一致；探测失败时安全回退为 False，不向上抛异常。
     """
     if os.path.splitext(src)[1].lower() in DSD_EXTS:
         return True
     if params is None:
         if ffprobe is None:
             ffprobe = resolve_tool("ffprobe")
-        params = probe_audio(src, ffprobe)
+        try:
+            params = probe_audio(src, ffprobe)
+        except Exception:  # noqa: BLE001
+            # 保持分轨链路原有的容错口径：探测失败只影响判定，不中断转换。
+            params = None
     codec = (params or {}).get("codec", "").lower()
     return codec.startswith("dsd")
 

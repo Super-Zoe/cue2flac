@@ -1,0 +1,5 @@
+# CI 测试依赖：pytest / PyYAML 版本的唯一来源
+# 与 .github/workflows/build.yml 的 "pip install -r requirements-ci.txt" 对应
+# 固定版本，禁止 >= / latest / 浮动标签；升级只需改本文件
+pytest==9.2.0
+pyyaml==6.0.3

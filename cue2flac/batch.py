@@ -30,6 +30,24 @@ from .convert import (
 _TRACK_OUT_NAME_RE = re.compile(r"^(\d{1,3})\.\s+?(\S.*)$")
 
 
+def _title_in_cue_titles(title: str, cue_titles) -> bool:
+    """判断抽出的标题是否与某个 CUE 曲目标题对得上。
+
+    匹配规则：
+    - 完全相等；
+    - 以该标题开头（如 CUE 标题为「第一首」，产物标题为「第一首 (Live)」）。
+
+    两种形态都不满足时返回 False——宁可漏判（多转一次）也不误判
+    （把真实母带当产物丢弃）。
+    """
+    for t in cue_titles:
+        if not t:
+            continue
+        if title == t or title.startswith(t):
+            return True
+    return False
+
+
 @dataclass
 class ProcessedItem:
     """一个被成功处理的 CUE。"""
@@ -183,10 +201,18 @@ def expand_to_inputs(
     def _is_generated_output(path: str) -> bool:
         """判断路径是否是**本批 CUE 生成的分轨产物**。
 
-        分轨输出命名为 ``NN. <曲目标题>.flac``（见 splitter._safe_name），
-        而文件名里的序号 + 标题必须与某个 CUE 的曲目对得上，才认定为产物。
-        仅凭「NN. 开头」判断会误伤真实母带——按曲目编号命名的整轨专辑
-        （如 ``01. 某专辑.ape``）也很常见。
+        分轨输出命名为 ``NN. <曲目标题>.flac``；当曲目带表演者时，
+        ``splitter._safe_name`` 会产出 ``NN. <表演者> - <曲目标题>.flac``。
+        因此这里抽出的「标题部分」可能是两种形态：
+
+        - ``第一首``            —— 无表演者时的纯标题；
+        - ``陈奕迅 - 第一首``   —— 有表演者时的「表演者 - 标题」。
+
+        判定时两种形态都要能匹配上 CUE 的曲目标题，否则带表演者的分轨产物
+        会被漏判为「未被引用的音频」，导致重复扫描时又被直转一次、输出膨胀。
+
+        但也不能仅凭「NN. 开头」就认定是产物——按曲目编号命名的整轨专辑
+        （如 ``01. 某专辑.ape``）也很常见，必须标题确实对得上才排除。
         """
         stem = os.path.splitext(os.path.basename(path))[0]
         m = _TRACK_OUT_NAME_RE.match(stem)
@@ -195,7 +221,15 @@ def expand_to_inputs(
         title = m.group(2).strip().lower()
         if not title:
             return False
-        return any(title == t or title.startswith(t) for t in track_titles)
+        if _title_in_cue_titles(title, track_titles):
+            return True
+        # 形态二：「<表演者> - <曲目标题>」——拆出末段的标题再比对。
+        # 用 rsplit 只切一次，避免标题本身含 " - " 时被切错。
+        if " - " in title:
+            tail = title.rsplit(" - ", 1)[1].strip()
+            if tail and _title_in_cue_titles(tail, track_titles):
+                return True
+        return False
 
     audios: List[str] = []
     seen: set[str] = set()

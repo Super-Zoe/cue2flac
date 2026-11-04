@@ -285,3 +285,50 @@ def test_expand_to_inputs_keeps_real_master_named_like_track():
     assert cues == []
     assert len(audios) == 1
     assert os.path.basename(audios[0]) == "01. 某专辑.ape"
+
+
+def test_expand_to_inputs_excludes_generated_outputs_with_performer():
+    """带表演者的分轨产物也不应再被当成母带直转。
+
+    回归防护：splitter._safe_name 在曲目有表演者时产出的是
+    「NN. <表演者> - <曲目标题>.flac」，而不是「NN. <曲目标题>.flac」。
+    产物识别若只比对纯标题形态，就会漏判这类文件——重复扫描同一目录时，
+    上一次的输出会被再转一遍，输出目录不断膨胀。
+    """
+    fake_tree = tempfile.mkdtemp()
+    cue_path = os.path.join(fake_tree, "album.cue")
+    with open(cue_path, "w", encoding="utf-8", newline="\r\n") as f:
+        f.write('FILE "master.flac" WAVE\r\n'
+                '  TRACK 01 AUDIO\r\n'
+                '    PERFORMER "陈奕迅"\r\n'
+                '    TITLE "浮夸"\r\n'
+                '    INDEX 01 00:00:00\r\n'
+                '  TRACK 02 AUDIO\r\n'
+                '    PERFORMER "陈奕迅"\r\n'
+                '    TITLE "富士山下"\r\n'
+                '    INDEX 01 00:03:00\r\n')
+    out_dir = os.path.join(fake_tree, "专辑")
+    os.makedirs(out_dir, exist_ok=True)
+    for name in ("01. 陈奕迅 - 浮夸.flac", "02. 陈奕迅 - 富士山下.flac"):
+        with open(os.path.join(out_dir, name), "wb") as f:
+            f.write(b"\x00\x00")
+
+    cues, audios = batch.expand_to_inputs([fake_tree], recursive=True)
+    assert len(cues) == 1
+    assert audios == [], "带表演者的分轨产物不应进入直转列表: %s" % audios
+
+
+def test_expand_to_inputs_keeps_master_when_performer_prefixed_real_file():
+    """「NN. <表演者> - <标题>」形态的真实母带也不应被误排除。
+
+    回归防护：产物识别的「表演者 - 标题」拆解必须以 CUE 里确实存在
+    该曲目标题为前提，不能仅凭文件名含 " - " 就丢弃。
+    """
+    fake_tree = tempfile.mkdtemp()
+    audio = os.path.join(fake_tree, "01. 某歌手 - 某专辑.flac")
+    with open(audio, "wb") as f:
+        f.write(b"\x00\x00")
+    cues, audios = batch.expand_to_inputs([fake_tree], recursive=True)
+    assert cues == []
+    assert len(audios) == 1
+    assert os.path.basename(audios[0]) == "01. 某歌手 - 某专辑.flac"
